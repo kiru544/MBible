@@ -2,112 +2,99 @@ package com.example.mbible.data
 
 import android.content.ContentValues
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class NotesRepository(context: Context) {
-    private val helper = NotesDbHelper(context)
+    // applicationContext so the helper never holds a Fragment/Activity context.
+    private val helper = NotesDbHelper(context.applicationContext)
 
-    fun getAll(): List<Note> {
-        val db = helper.readableDatabase
+    suspend fun getAll(): List<Note> = withContext(Dispatchers.IO) {
         val list = mutableListOf<Note>()
-
-        val c = db.rawQuery(
+        helper.readableDatabase.rawQuery(
             "SELECT id, title, body, updated_at FROM notes ORDER BY updated_at DESC",
             null
-        )
-
-        c.use {
-            while (it.moveToNext()) {
-                list.add(
-                    Note(
-                        id = it.getLong(0),
-                        title = it.getString(1),
-                        body = it.getString(2),
-                        updatedAt = it.getLong(3)
-                    )
-                )
+        ).use { c ->
+            while (c.moveToNext()) {
+                list.add(Note(c.getLong(0), c.getString(1), c.getString(2), c.getLong(3)))
             }
         }
-        return list
+        list
     }
 
-    fun create(title: String): Long {
-        val db = helper.writableDatabase
-        val now = System.currentTimeMillis()
+    suspend fun getById(id: Long): Note? = withContext(Dispatchers.IO) {
+        helper.readableDatabase.rawQuery(
+            "SELECT id, title, body, updated_at FROM notes WHERE id = ? LIMIT 1",
+            arrayOf(id.toString())
+        ).use { c ->
+            if (!c.moveToFirst()) return@withContext null
+            Note(c.getLong(0), c.getString(1), c.getString(2), c.getLong(3))
+        }
+    }
 
+    suspend fun create(title: String): Long = withContext(Dispatchers.IO) {
         val values = ContentValues().apply {
             put("title", title)
             put("body", "")
-            put("updated_at", now)
-        }
-        return db.insert("notes", null, values)
-    }
-    fun getById(id: Long): Note? {
-        val db = helper.readableDatabase
-        val c = db.rawQuery(
-            "SELECT id, title, body, updated_at FROM notes WHERE id = ? LIMIT 1",
-            arrayOf(id.toString())
-        )
-
-        c.use {
-            if (!it.moveToFirst()) return null
-            return Note(
-                id = it.getLong(0),
-                title = it.getString(1),
-                body = it.getString(2),
-                updatedAt = it.getLong(3)
-            )
-        }
-    }
-    fun update(id: Long, title: String, body: String) {
-        val db = helper.writableDatabase
-        val values = ContentValues().apply {
-            put("title", title)
-            put("body", body)
             put("updated_at", System.currentTimeMillis())
         }
-        db.update("notes", values, "id=?", arrayOf(id.toString()))
-    }
-    fun delete(id: Long) {
-        val db = helper.writableDatabase
-        db.delete("notes", "id=?", arrayOf(id.toString()))
-    }
-    fun exportToJson(context: Context): String {
-        val notes = getAll()
-        val jsonArray = org.json.JSONArray()
-        for (note in notes) {
-            val obj = org.json.JSONObject()
-            obj.put("title", note.title)
-            obj.put("body", note.body)
-            obj.put("updated_at", note.updatedAt)
-            jsonArray.put(obj)
-        }
-        return jsonArray.toString(2)
+        helper.writableDatabase.insert("notes", null, values)
     }
 
-    /** Exports a single note in the same array format, so it re-imports cleanly. */
-    fun exportOneToJson(id: Long): String {
-        val note = getById(id) ?: return "[]"
-        val obj = org.json.JSONObject()
-        obj.put("title", note.title)
-        obj.put("body", note.body)
-        obj.put("updated_at", note.updatedAt)
-        return org.json.JSONArray().put(obj).toString(2)
-    }
-
-    fun importFromJson(json: String): Int {
-        val jsonArray = org.json.JSONArray(json)
-        var count = 0
-        for (i in 0 until jsonArray.length()) {
-            val obj = jsonArray.getJSONObject(i)
-            val title = obj.optString("title", "Imported Note")
-            val body = obj.optString("body", "")
-            create(title).also { id ->
-                if (id != -1L) {
-                    update(id, title, body)
-                    count++
-                }
+    suspend fun update(id: Long, title: String, body: String) {
+        withContext(Dispatchers.IO) {
+            val values = ContentValues().apply {
+                put("title", title)
+                put("body", body)
+                put("updated_at", System.currentTimeMillis())
             }
+            helper.writableDatabase.update("notes", values, "id=?", arrayOf(id.toString()))
         }
-        return count
+    }
+
+    suspend fun delete(id: Long) {
+        withContext(Dispatchers.IO) {
+            helper.writableDatabase.delete("notes", "id=?", arrayOf(id.toString()))
+        }
+    }
+
+    suspend fun exportToJson(): String = withContext(Dispatchers.IO) {
+        val jsonArray = org.json.JSONArray()
+        for (note in getAll()) {
+            jsonArray.put(
+                org.json.JSONObject()
+                    .put("title", note.title)
+                    .put("body", note.body)
+                    .put("updated_at", note.updatedAt)
+            )
+        }
+        jsonArray.toString(2)
+    }
+
+    suspend fun exportOneToJson(id: Long): String = withContext(Dispatchers.IO) {
+        val note = getById(id) ?: return@withContext "[]"
+        val obj = org.json.JSONObject()
+            .put("title", note.title)
+            .put("body", note.body)
+            .put("updated_at", note.updatedAt)
+        org.json.JSONArray().put(obj).toString(2)
+    }
+
+    // Folds in the earlier cleanup: ONE insert per note instead of insert+update,
+    // and it now preserves the original updated_at on round‑trip import/export.
+    suspend fun importFromJson(json: String): Int = withContext(Dispatchers.IO) {
+        val arr = org.json.JSONArray(json)
+        var count = 0
+        val db = helper.writableDatabase
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            val values = ContentValues().apply {
+                put("title", obj.optString("title", "Imported Note"))
+                put("body", obj.optString("body", ""))
+                put("updated_at", obj.optLong("updated_at", System.currentTimeMillis()))
+            }
+            if (db.insert("notes", null, values) != -1L) count++
+        }
+        count
     }
 }

@@ -7,18 +7,23 @@ import kotlinx.coroutines.withContext
 
 /**
  * BibleSource backed by the bundled bible.db (KJV).
- * Identical logic to the original BibleRepository, just moved off the main
- * thread via withContext(Dispatchers.IO) so it can share an interface with
- * the network-backed RemoteBibleSource.
+ *
+ * The DB handle is opened lazily on first query rather than in the constructor,
+ * so building this (and the first-run copy from assets inside
+ * BibleDatabaseHelper.getDatabasePath) happens on Dispatchers.IO at the first
+ * read instead of on the main thread when a fragment is created. Because the
+ * owning BibleRepository is now an app-scoped singleton, this one handle is
+ * reused for the app's lifetime instead of leaking a new connection per screen.
  */
-class LocalBibleSource(context: Context) : BibleSource {
+class LocalBibleSource(private val context: Context) : BibleSource {
 
-    private val db: SQLiteDatabase =
+    private val db: SQLiteDatabase by lazy {
         SQLiteDatabase.openDatabase(
-            BibleDatabaseHelper.getDatabasePath(context),
+            BibleDatabaseHelper.getDatabasePath(context.applicationContext),
             null,
             SQLiteDatabase.OPEN_READONLY
         )
+    }
 
     override suspend fun getBooks(testament: String): List<String> = withContext(Dispatchers.IO) {
         val books = mutableListOf<String>()

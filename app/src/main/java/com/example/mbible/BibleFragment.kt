@@ -41,6 +41,16 @@ class BibleFragment : Fragment() {
 
     private lateinit var versePager: androidx.viewpager2.widget.ViewPager2
 
+    // §5E — one callback, registered once, reading the up-to-date currentBook.
+    // The old code registered a fresh callback on every showVerses(), stacking
+    // duplicates so onPageSelected fired multiple times.
+    private val pageChangeCallback = object : ViewPager2.OnPageChangeCallback() {
+        override fun onPageSelected(position: Int) {
+            currentChapter = position + 1
+            selectedBookTitle.text = "${currentBook ?: ""} ${position + 1}"
+        }
+    }
+
     companion object {
         private const val ARG_TESTAMENT = "testament"
 
@@ -56,7 +66,8 @@ class BibleFragment : Fragment() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         testament = arguments?.getString(ARG_TESTAMENT) ?: "Old"
-        bibleRepo = BibleRepository(requireContext())
+        // §3 — shared singleton; opens the bundled bible.db once for the whole app.
+        bibleRepo = requireContext().app.bibleRepository
     }
 
     override fun onCreateView(
@@ -81,6 +92,9 @@ class BibleFragment : Fragment() {
         bookListHeader.text = "\u25C6 " + (if (testament == "New") "NEW TESTAMENT" else "OLD TESTAMENT")
         translationPicker = view.findViewById(R.id.translationPicker)
         versePager = view.findViewById(R.id.versePager)
+
+        // §5E — register the page-change callback exactly once.
+        versePager.registerOnPageChangeCallback(pageChangeCallback)
 
         // Theme toggle: show the right icon, and flip the theme on tap.
         btnThemeToggle = view.findViewById(R.id.btnThemeToggle)
@@ -130,6 +144,12 @@ class BibleFragment : Fragment() {
         showBookPager()
     }
 
+    override fun onDestroyView() {
+        // §5E — pair the single registration with an unregister.
+        versePager.unregisterOnPageChangeCallback(pageChangeCallback)
+        super.onDestroyView()
+    }
+
     private fun showBookPager() {
         inChaptersView = false
         inVersesView = false
@@ -174,6 +194,7 @@ class BibleFragment : Fragment() {
     private fun showVerses(bookName: String, chapter: Int) {
         inChaptersView = false
         inVersesView = true
+        currentBook = bookName
         currentChapter = chapter
 
         selectedBookTitle.text = "$bookName $chapter"
@@ -193,17 +214,12 @@ class BibleFragment : Fragment() {
                 bookName, testament, chapterCount, bibleRepo, viewLifecycleOwner
             )
 
-            // Update title + currentChapter when swiping
-            versePager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
-                override fun onPageSelected(position: Int) {
-                    currentChapter = position + 1
-                    selectedBookTitle.text = "$bookName ${position + 1}"
-                }
-            })
-
+            // §5E — no per-call registration here anymore; the single callback
+            // registered in onViewCreated reads currentBook (set just above).
             versePager.setCurrentItem(chapter - 1, false)
         }
     }
+
     private fun updateTranslationLabel() {
         translationPicker.text = "${bibleRepo.activeTranslation.abbreviation} ▾"
     }
@@ -293,6 +309,7 @@ class BibleFragment : Fragment() {
             }
         }
     }
+
     fun onBackPressed(): Boolean {
         return when {
             inVersesView -> {
