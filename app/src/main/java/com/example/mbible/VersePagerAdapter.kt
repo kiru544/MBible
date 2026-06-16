@@ -52,6 +52,14 @@ class VersePagerAdapter(
                 holder.textView.justificationMode =
                     android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
             }
+            // Make the footnote "*" tappable, but only when this chapter actually
+            // has footnotes — leaves KJV / footnote-free chapters untouched.
+            if (verses.any { it.footnotes.isNotEmpty() }) {
+                holder.textView.movementMethod =
+                    android.text.method.LinkMovementMethod.getInstance()
+                holder.textView.highlightColor = android.graphics.Color.TRANSPARENT
+            }
+
         }
     }
 

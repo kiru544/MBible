@@ -26,4 +26,6 @@
     <color name="hairline">#E6DAC4</color>        <!-- 1px borders / dividers / rules -->
     <color name="text_tertiary">#B49D7E</color>   <!-- verse numbers, dates, eyebrow meta -->
     <color name="accent_soft">#1ABC4B23</color>   <!-- accent wash (~10% accent): chips, active tab, highlight bg -->
+
+    <color name="wj_red">#C0392B</color>
 </resources>

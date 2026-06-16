@@ -26,7 +26,8 @@ class ChapterCache(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // no-op for now; if schema changes, drop & recreate is fine since this is a cache
+        db.execSQL("DROP TABLE IF EXISTS chapter_cache")
+        onCreate(db)
     }
 
     fun get(versionId: Int, bookUsfm: String, chapter: Int): List<Verse>? {
@@ -42,7 +43,20 @@ class ChapterCache(context: Context) :
     fun put(versionId: Int, bookUsfm: String, chapter: Int, verses: List<Verse>) {
         val arr = JSONArray()
         for (v in verses) {
-            arr.put(JSONObject().put("n", v.verse).put("t", v.text))
+            val fArr = JSONArray()
+            for (f in v.footnotes) fArr.put(f.text)
+
+            val o = JSONObject()
+                .put("n", v.verse)
+                .put("t", v.text)
+                .put("f", fArr)
+            if (v.heading != null) o.put("h", v.heading)
+            if (v.segments.isNotEmpty()) {
+                val segArr = JSONArray()
+                for (seg in v.segments) segArr.put(JSONObject().put("s", seg.text).put("j", seg.isJesus))
+                o.put("seg", segArr)
+            }
+            arr.put(o)   // add only after o is fully populated
         }
         val values = ContentValues().apply {
             put("version_id", versionId)
@@ -74,7 +88,23 @@ class ChapterCache(context: Context) :
         val out = ArrayList<Verse>(arr.length())
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
-            out.add(Verse(o.getInt("n"), o.getString("t")))
+
+            val notes = mutableListOf<Footnote>()
+            o.optJSONArray("f")?.let { fa ->
+                for (j in 0 until fa.length()) notes.add(Footnote(fa.getString(j)))
+            }
+
+            val heading = if (o.has("h")) o.getString("h") else null
+
+            val segs = mutableListOf<VerseSegment>()
+            o.optJSONArray("seg")?.let { sa ->
+                for (k in 0 until sa.length()) {
+                    val so = sa.getJSONObject(k)
+                    segs.add(VerseSegment(so.getString("s"), so.getBoolean("j")))
+                }
+            }
+
+            out.add(Verse(o.getInt("n"), o.getString("t"), notes, heading, segs))
         }
         return out
     }

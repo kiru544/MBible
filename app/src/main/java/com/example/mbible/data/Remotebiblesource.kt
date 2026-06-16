@@ -130,27 +130,181 @@ class RemoteBibleSource(
             emptyList()
         }
     }
+    private val footnoteOpen = Regex("""<span class="yv-n[^"]*">""")
+    private val spanToken    = Regex("""<span\b[^>]*>|</span>""")
 
+    /**
+     * Given the index just AFTER an outer <span ...> open tag, return the index of
+     * the bracket of its MATCHING </span>, accounting for nested spans
+     * (fr / ft / fqa / ref / xt). Returns -1 if the markup is unbalanced.
+     */
+    private fun matchingSpanClose(s: String, from: Int): Int {
+        var depth = 1
+        var idx = from
+        while (true) {
+            val m = spanToken.find(s, idx) ?: return -1
+            if (m.value.startsWith("</span")) {
+                depth--
+                if (depth == 0) return m.range.first
+            } else {
+                depth++
+            }
+            idx = m.range.last + 1
+        }
+    }
+
+    /**
+     * Removes every <span class="yv-n ...>…</span> footnote from one verse's raw HTML.
+     * Returns the HTML with footnotes removed, plus the flattened footnote texts
+     * (e.g. "6:7 Greek take two hundred denarii").
+     */
+    private fun extractFootnotes(segment: String): Pair<String, List<Footnote>> {
+        val notes = mutableListOf<Footnote>()
+        val sb = StringBuilder()
+        var i = 0
+        while (i < segment.length) {
+            val m = footnoteOpen.find(segment, i)
+            if (m == null) {
+                sb.append(segment, i, segment.length)
+                break
+            }
+            sb.append(segment, i, m.range.first)          // keep text before the footnote
+            val innerStart = m.range.last + 1
+            val closeIdx = matchingSpanClose(segment, innerStart)
+            if (closeIdx == -1) {
+                i = segment.length                          // malformed: drop remainder of note
+            } else {
+                val flat = stripTags(segment.substring(innerStart, closeIdx))
+                if (flat.isNotEmpty()) notes.add(Footnote(flat))
+                i = closeIdx + "</span>".length             // resume after the footnote
+            }
+        }
+        return sb.toString() to notes
+    }
     private fun parseHtmlPassage(html: String): List<Verse> {
-        val verseMarker = Regex("""<span[^>]+\bv="(\d+)"[^>]*/?>""")
-        val matches = verseMarker.findAll(html).toList()
+        // 1. Drop the printed verse-number labels.
+        var cleaned = html.replace(
+            Regex("""<span class="yv-vlbl">.*?</span>""", RegexOption.DOT_MATCHES_ALL),
+            ""
+        )
+
+        val anchorRe = Regex("""<span class="yv-v" v="(\d+)"></span>""")
+
+        // 2. NEW — Section headings: <div class="… yv-h">TEXT</div> sit BETWEEN verses.
+        //    Attach each heading to the FIRST verse anchor that follows it, then remove
+        //    the heading divs so their text never leaks into a verse.
+        val headingDiv = Regex("""<div class="[^"]*yv-h[^"]*">(.*?)</div>""", RegexOption.DOT_MATCHES_ALL)
+        val headingFor = HashMap<Int, String>()
+        for (h in headingDiv.findAll(cleaned)) {
+            val htext = stripTags(h.groupValues[1])
+            if (htext.isEmpty()) continue
+            val next = anchorRe.find(cleaned, h.range.last + 1) ?: continue   // the verse that follows
+            next.groupValues[1].toIntOrNull()?.let { headingFor[it] = htext } // nearest heading wins
+        }
+        cleaned = cleaned.replace(headingDiv, "")   // strip headings from inline text
+
+        // 3. Split on verse anchors and build each verse.
+        val matches = anchorRe.findAll(cleaned).toList()
         val verses = mutableListOf<Verse>()
         for (i in matches.indices) {
-            val num = matches[i].groupValues[1].toIntOrNull() ?: continue
+            val verseNum = matches[i].groupValues[1].toIntOrNull() ?: continue
             val start = matches[i].range.last + 1
-            val end = if (i + 1 < matches.size) matches[i + 1].range.first else html.length
-            val text = html.substring(start, end).cleaned()
-            if (text.isNotEmpty()) verses.add(Verse(num, text))
+            val end = if (i + 1 < matches.size) matches[i + 1].range.first else cleaned.length
+
+            val rawSegment = cleaned.substring(start, end)
+            val (noteFree, notes) = extractFootnotes(rawSegment)   // footnote feature — unchanged
+            val text = stripTags(noteFree)
+            val segs = parseVerseSegments(noteFree)
+            val safeSegs = if (segs.joinToString("") { it.text } == text && segs.any { it.isJesus }) segs else emptyList()
+            if (text.isNotEmpty()) verses.add(Verse(verseNum, text, notes, headingFor[verseNum], safeSegs))
         }
         return verses
     }
-
+    private fun stripTags(s: String): String {
+        return s
+            .replace(Regex("""<[^>]+>"""), "")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+    }
     /** Strip verse-label spans, all other HTML tags, then collapse whitespace. */
     private fun String.cleaned(): String =
         replace(Regex("""<span[^>]*yv-vlbl[^>]*>\d+</span>"""), "")
             .replace(Regex("<[^>]+>"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
+    private fun isWjOpen(tag: String): Boolean =
+        tag.startsWith("<span") && (tag.contains("class=\"wj\"") || tag.contains("class=\"wj "))
+
+    /**
+     * Splits footnote-free verse HTML into red/normal segments, cleaning text the
+     * SAME way stripTags does (remove tags, unescape the 4 entities, collapse
+     * whitespace, trim) so the concatenation equals stripTags(html).
+     */
+    private fun parseVerseSegments(html: String): List<VerseSegment> {
+        val segs = mutableListOf<VerseSegment>()
+        val cur = StringBuilder()
+        var curRed = false
+        var spanDepth = 0          // count of all currently-open <span>s
+        var inWj = false
+        var wjCloseDepth = -1       // span depth at which the active wj span will close
+        var lastWasSpace = true     // drop leading whitespace, like trim()
+
+        fun flush() { if (cur.isNotEmpty()) { segs.add(VerseSegment(cur.toString(), curRed)); cur.setLength(0) } }
+        fun setRed(red: Boolean) { if (red != curRed) { flush(); curRed = red } }
+        fun emit(s: String) {
+            for (c in s) {
+                if (c.isWhitespace()) { if (!lastWasSpace) { cur.append(' '); lastWasSpace = true } }
+                else { cur.append(c); lastWasSpace = false }
+            }
+        }
+
+        var i = 0
+        while (i < html.length) {
+            val c = html[i]
+            when {
+                c == '<' -> {
+                    val gt = html.indexOf('>', i)
+                    val end = if (gt == -1) html.length else gt + 1
+                    val tag = html.substring(i, end)
+                    if (tag.startsWith("</")) {
+                        if (tag.startsWith("</span")) {
+                            if (spanDepth > 0) spanDepth--
+                            if (inWj && spanDepth == wjCloseDepth) { inWj = false; setRed(false) }
+                        }
+                        // other closing tags (</div> etc.) are ignored
+                    } else if (tag.startsWith("<span")) {
+                        if (isWjOpen(tag) && !inWj) { inWj = true; wjCloseDepth = spanDepth; setRed(true) }
+                        spanDepth++          // count every span, wj or not
+                    }
+                    // other opening tags (<div ...>) are ignored, not counted
+                    i = end
+                }
+                c == '&' -> {
+                    val semi = html.indexOf(';', i)
+                    val rep = if (semi != -1 && semi - i <= 5) when (html.substring(i, semi + 1)) {
+                        "&nbsp;" -> " "
+                        "&amp;"  -> "&"
+                        "&quot;" -> "\""
+                        "&#39;"  -> "'"
+                        else     -> null
+                    } else null
+                    if (rep != null) { emit(rep); i = semi + 1 } else { emit("&"); i++ }
+                }
+                else -> { emit(c.toString()); i++ }
+            }
+        }
+        flush()
+        if (segs.isNotEmpty()) {                      // mirror trailing trim()
+            val last = segs.last()
+            segs[segs.size - 1] = last.copy(text = last.text.trimEnd())
+            if (segs.last().text.isEmpty()) segs.removeAt(segs.size - 1)
+        }
+        return segs
+    }
 }
 
 /**
