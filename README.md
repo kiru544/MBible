@@ -1,6 +1,6 @@
 # BibleNotes - BETA 📖
 
-*Last updated: 13/6/26*
+*Last updated: 16/6/26*
 
 A Bible reading and note-taking app for Android.
 
@@ -154,6 +154,7 @@ The Catechism PDF is included as a reference document. Check the source or editi
 Logs:
 11/06/26: added light theme with some UI/UX improvements
 13/06/26: UI/UX up-to-date with the design, with some adjustments
+16/06/26: attempted formatting NIV
 
 ---
 *Personal project — built to actually use.*
