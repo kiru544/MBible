@@ -14,9 +14,6 @@ import org.json.JSONObject
  * Schema: one row per (translation, book USFM, chapter) holding a JSON-encoded
  * list of verses. JSON is used (rather than per-verse rows) so a chapter is
  * written atomically — no partially-cached chapters on a mid-fetch crash.
- *
- * Cached chapters are kept indefinitely until manually cleared
- * (see [clearTranslation]).
  */
 class ChapterCache(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
@@ -26,6 +23,7 @@ class ChapterCache(context: Context) :
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        // Cache only — safe to wipe & rebuild whenever the stored shape changes.
         db.execSQL("DROP TABLE IF EXISTS chapter_cache")
         onCreate(db)
     }
@@ -44,7 +42,9 @@ class ChapterCache(context: Context) :
         val arr = JSONArray()
         for (v in verses) {
             val fArr = JSONArray()
-            for (f in v.footnotes) fArr.put(f.text)
+            for (f in v.footnotes) {
+                fArr.put(JSONObject().put("t", f.text).put("o", f.offset))
+            }
 
             val o = JSONObject()
                 .put("n", v.verse)
@@ -89,9 +89,20 @@ class ChapterCache(context: Context) :
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
 
+            val verseText = o.getString("t")
+
+            // Footnotes: new shape is {"t","o"}; tolerate the old bare-string shape
+            // (offset unknown → pin to end of verse).
             val notes = mutableListOf<Footnote>()
             o.optJSONArray("f")?.let { fa ->
-                for (j in 0 until fa.length()) notes.add(Footnote(fa.getString(j)))
+                for (j in 0 until fa.length()) {
+                    val fn = fa.opt(j)
+                    if (fn is JSONObject) {
+                        notes.add(Footnote(fn.getString("t"), fn.optInt("o", verseText.length)))
+                    } else {
+                        notes.add(Footnote(fn.toString(), verseText.length))
+                    }
+                }
             }
 
             val heading = if (o.has("h")) o.getString("h") else null
@@ -104,14 +115,14 @@ class ChapterCache(context: Context) :
                 }
             }
 
-            out.add(Verse(o.getInt("n"), o.getString("t"), notes, heading, segs))
+            out.add(Verse(o.getInt("n"), verseText, notes, heading, segs))
         }
         return out
     }
 
     companion object {
         private const val DB_NAME = "remote_bible_cache.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 5
         private const val CREATE_TABLE = """
             CREATE TABLE IF NOT EXISTS chapter_cache (
                 version_id INTEGER NOT NULL,
