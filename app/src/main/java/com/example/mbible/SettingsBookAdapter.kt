@@ -7,14 +7,23 @@ import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.LinearLayout
 import android.widget.TextView
-import com.example.mbible.BookAliasRepository
 
 /** Settings book rows: badge + name + existing short names shown as tags. */
 class SettingsBookAdapter(
     context: Context,
     private val books: List<String>,
-    private val aliasRepo: BookAliasRepository
+    aliasMap: Map<String, List<String>>
 ) : ArrayAdapter<String>(context, 0, books) {
+
+    // Aliases are loaded once (off the main thread) and handed in, so getView
+    // never touches the database while the list scrolls.
+    private var aliasMap: Map<String, List<String>> = aliasMap
+
+    /** Swap in a freshly loaded alias map (e.g. after returning from the editor). */
+    fun update(newMap: Map<String, List<String>>) {
+        aliasMap = newMap
+        notifyDataSetChanged()
+    }
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
         val view = convertView ?: LayoutInflater.from(context)
@@ -29,7 +38,8 @@ class SettingsBookAdapter(
         val noAlias = view.findViewById<TextView>(R.id.noAliasText)
         tagRow.removeAllViews()
 
-        val aliases = aliasRepo.getAliasesForBook(book)
+        // Read from the in-memory map instead of querying per row.
+        val aliases = aliasMap[book].orEmpty()
         if (aliases.isEmpty()) {
             tagRow.visibility = View.GONE
             noAlias.visibility = View.VISIBLE

@@ -7,10 +7,14 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.example.mbible.data.NotesRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class NotesListFragment : Fragment() {
 
@@ -19,7 +23,8 @@ class NotesListFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        notesRepo = NotesRepository(requireContext())
+        // §3 — shared singleton instead of a per-fragment instance.
+        notesRepo = requireContext().app.notesRepository
     }
 
     override fun onCreateView(
@@ -59,8 +64,11 @@ class NotesListFragment : Fragment() {
                     .setTitle("Delete note?")
                     .setMessage("This will permanently delete \"${note.title}\".")
                     .setPositiveButton("Delete") { _, _ ->
-                        notesRepo.delete(note.id)
-                        refreshNotes()
+                        // WRAP #1 — delete() is now suspend
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            notesRepo.delete(note.id)
+                            refreshNotes()
+                        }
                     }
                     .setNegativeButton("Cancel", null)
                     .show()
@@ -77,9 +85,12 @@ class NotesListFragment : Fragment() {
                 .setView(input)
                 .setPositiveButton("Create") { _, _ ->
                     val title = input.text.toString().trim().ifEmpty { "New Note" }
-                    val newId = notesRepo.create(title)
-                    refreshNotes()
-                    openNote(newId)
+                    // WRAP #2 — create() is now suspend
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val newId = notesRepo.create(title)
+                        refreshNotes()
+                        openNote(newId)
+                    }
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
@@ -94,31 +105,40 @@ class NotesListFragment : Fragment() {
     }
 
     private fun refreshNotes() {
-        notesAdapter.submitList(notesRepo.getAll())
+        // WRAP #3 — getAll() is now suspend
+        viewLifecycleOwner.lifecycleScope.launch {
+            notesAdapter.submitList(notesRepo.getAll())
+        }
     }
+
     private val importLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) return@registerForActivityResult
-        try {
-            val json = requireContext().contentResolver
-                .openInputStream(uri)
-                ?.bufferedReader()
-                ?.readText() ?: return@registerForActivityResult
+        // WRAP #4 — file read on IO, importFromJson() is now suspend
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val json = withContext(Dispatchers.IO) {
+                    requireContext().contentResolver
+                        .openInputStream(uri)
+                        ?.bufferedReader()
+                        ?.readText()
+                } ?: return@launch
 
-            val count = notesRepo.importFromJson(json)
-            refreshNotes()
-            android.widget.Toast.makeText(
-                requireContext(),
-                "Imported $count notes",
-                android.widget.Toast.LENGTH_SHORT
-            ).show()
-        } catch (e: Exception) {
-            android.widget.Toast.makeText(
-                requireContext(),
-                "Import failed: ${e.message}",
-                android.widget.Toast.LENGTH_LONG
-            ).show()
+                val count = notesRepo.importFromJson(json)
+                refreshNotes()
+                android.widget.Toast.makeText(
+                    requireContext(),
+                    "Imported $count notes",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(
+                    requireContext(),
+                    "Import failed: ${e.message}",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
         }
     }
 
@@ -155,49 +175,59 @@ class NotesListFragment : Fragment() {
     // Only ever called on API 29+, so the MediaStore.Downloads fields are safe here.
     @androidx.annotation.RequiresApi(android.os.Build.VERSION_CODES.Q)
     private fun exportViaMediaStore() {
-        try {
-            val json = notesRepo.exportToJson(requireContext())
-            val fileName = "mbible_notes_${System.currentTimeMillis()}.json"
+        // WRAP #5a — exportToJson() is now suspend (and takes no Context arg)
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val json = notesRepo.exportToJson()
+                val fileName = "mbible_notes_${System.currentTimeMillis()}.json"
 
-            val contentValues = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
-                put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/json")
-            }
-
-            val resolver = requireContext().contentResolver
-            val uri = resolver.insert(
-                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                contentValues
-            )
-
-            uri?.let {
-                resolver.openOutputStream(it)?.use { stream ->
-                    stream.write(json.toByteArray())
+                val contentValues = android.content.ContentValues().apply {
+                    put(android.provider.MediaStore.Downloads.DISPLAY_NAME, fileName)
+                    put(android.provider.MediaStore.Downloads.MIME_TYPE, "application/json")
                 }
-                toastExported(fileName)
+
+                val resolver = requireContext().contentResolver
+                val uri = resolver.insert(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    contentValues
+                )
+
+                uri?.let {
+                    withContext(Dispatchers.IO) {
+                        resolver.openOutputStream(it)?.use { stream ->
+                            stream.write(json.toByteArray())
+                        }
+                    }
+                    toastExported(fileName)
+                }
+            } catch (e: Exception) {
+                toastExportFailed(e)
             }
-        } catch (e: Exception) {
-            toastExportFailed(e)
         }
     }
 
     // Legacy path for Android 7-9: write a File into the public Downloads folder.
     private fun writeLegacyExport() {
-        try {
-            val json = notesRepo.exportToJson(requireContext())
-            val fileName = "mbible_notes_${System.currentTimeMillis()}.json"
+        // WRAP #5b — exportToJson() is now suspend (and takes no Context arg)
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val json = notesRepo.exportToJson()
+                val fileName = "mbible_notes_${System.currentTimeMillis()}.json"
 
-            @Suppress("DEPRECATION")
-            val downloads = android.os.Environment.getExternalStoragePublicDirectory(
-                android.os.Environment.DIRECTORY_DOWNLOADS
-            )
-            if (!downloads.exists()) downloads.mkdirs()
+                withContext(Dispatchers.IO) {
+                    @Suppress("DEPRECATION")
+                    val downloads = android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS
+                    )
+                    if (!downloads.exists()) downloads.mkdirs()
 
-            val file = java.io.File(downloads, fileName)
-            java.io.FileOutputStream(file).use { it.write(json.toByteArray()) }
-            toastExported(fileName)
-        } catch (e: Exception) {
-            toastExportFailed(e)
+                    val file = java.io.File(downloads, fileName)
+                    java.io.FileOutputStream(file).use { it.write(json.toByteArray()) }
+                }
+                toastExported(fileName)
+            } catch (e: Exception) {
+                toastExportFailed(e)
+            }
         }
     }
 

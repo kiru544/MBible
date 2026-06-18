@@ -8,20 +8,6 @@ import android.util.Log
 /**
  * BibleSource backed by the YouVersion Platform SDK, with a local chapter
  * cache so the same passage isn't fetched twice.
- *
- * Translations served this way (e.g. NIV) require an internet connection
- * the *first* time the user opens any given chapter; after that, the
- * chapter is replayed from [ChapterCache] and works offline.
- *
- * IMPORTANT — field names below marked with TODOs are best-guesses from the
- * SDK's public API reference. After adding the SDK dependency, let Android
- * Studio's autocomplete confirm them and adjust as needed:
- *   - BibleVerse: verse number field & content field
- *   - BiblePassage: content field
- *
- * Reference:
- *   https://developers.youversion.com/sdks/kotlin
- *   https://mintlify.wiki/youversion/platform-sdk-kotlin/api/bible-api
  */
 class RemoteBibleSource(
     private val translation: Translation,
@@ -35,26 +21,9 @@ class RemoteBibleSource(
     @Volatile var lastError: Exception? = null
         private set
 
-    /**
-     * Books and the canon structure don't depend on the translation at our level
-     * of abstraction — we always show the same 66 Protestant books. So instead of
-     * an API round-trip on every screen, we serve book lists from BookMapping.
-     *
-     * If you later add translations from other canons (Catholic, Orthodox),
-     * this is the place to revisit.
-     */
     override suspend fun getBooks(testament: String): List<String> =
         BookMapping.namesInTestament(testament)
 
-    /**
-     * Chapter counts are likewise canon-stable across the translations we
-     * currently support. Hardcoded fast-path: ask the cached version if we
-     * have any verses for this book, otherwise fall back to a single API
-     * call. (For NIV specifically, chapter counts match KJV exactly.)
-     *
-     * A future improvement: pre-seed chapter counts from
-     * YouVersionApi.bible.versionIndex(versionId) on first launch.
-     */
     override suspend fun getChapterCount(bookName: String, testament: String): Int {
         val meta = BookMapping.byName(bookName) ?: return 0
         return ChapterCounts.forBook(meta.usfm)
@@ -90,10 +59,6 @@ class RemoteBibleSource(
         return loadChapter(meta.usfm, chapter).any { it.verse == verse }
     }
 
-    /**
-     * Fetch a chapter, going through the cache.
-     * Cache miss → call YouVersion SDK → parse → write cache → return.
-     */
     private suspend fun loadChapter(bookUsfm: String, chapter: Int): List<Verse> =
         withContext(Dispatchers.IO) {
             cache.get(versionId, bookUsfm, chapter)?.let { return@withContext it }
@@ -105,22 +70,12 @@ class RemoteBibleSource(
             verses
         }
 
-    /**
-     * Fetches the chapter via the passage endpoint (returns HTML), then parses
-     * individual verses out of it.
-     *
-     * BibleVerse (the SDK model) only carries id/passageId/title — no text.
-     * Actual verse text lives in BiblePassage.content as HTML:
-     *   <span class="yv-v" v="1"></span><span class="yv-vlbl">1</span>verse text…
-     * We split on the v="N" markers and strip tags from each segment.
-     */
     private suspend fun fetchChapterFromSdk(bookUsfm: String, chapter: Int): List<Verse> {
         val passageId = "${bookUsfm.uppercase()}.$chapter"
         return try {
             Log.d("RemoteBible", "Fetching versionId=$versionId passageId=$passageId")
             val passage = YouVersionApi.bible.passage(versionId, passageId, "html")
             Log.d("RemoteBible", "Raw HTML length=${passage.content.length}")
-            Log.d("RemoteBible", "Raw HTML: ${passage.content.take(1000)}")
             val verses = parseHtmlPassage(passage.content)
             Log.d("RemoteBible", "Parsed ${verses.size} verses")
             verses
@@ -131,31 +86,211 @@ class RemoteBibleSource(
         }
     }
 
+    private val footnoteOpen = Regex("""<span class="[^"]*\byv-n\b[^"]*"[^>]*>""")
+    private val spanToken    = Regex("""<span\b[^>]*>|</span>""")
+    private val paraDivOpen  = Regex("""<div class="p">""")
+
+    /** Sentinels that survive tag-strip + whitespace-collapse. */
+    private val fnMark = '\u0001'     // where a footnote was
+    private val paraMark = '\u0002'   // a <div class="p"> paragraph break
+
+    /**
+     * Given the index just AFTER an outer <span ...> open tag, return the index of
+     * the bracket of its MATCHING </span>, accounting for nested spans
+     * (fr / ft / fqa / ref / xt). Returns -1 if the markup is unbalanced.
+     */
+    private fun matchingSpanClose(s: String, from: Int): Int {
+        var depth = 1
+        var idx = from
+        while (true) {
+            val m = spanToken.find(s, idx) ?: return -1
+            if (m.value.startsWith("</span")) {
+                depth--
+                if (depth == 0) return m.range.first
+            } else {
+                depth++
+            }
+            idx = m.range.last + 1
+        }
+    }
+
+    /**
+     * Removes every yv-n footnote from one verse's raw HTML, leaving the rest of
+     * the markup (wj spans, divs, etc.) intact. A [fnMark] sentinel is left where
+     * each footnote sat. Returns (noteFreeHtml, footnoteTexts) in document order.
+     */
+    private fun extractFootnotes(segment: String): Pair<String, List<String>> {
+        val noteTexts = mutableListOf<String>()
+        val sb = StringBuilder()
+        var i = 0
+        while (i < segment.length) {
+            val m = footnoteOpen.find(segment, i)
+            if (m == null) {
+                sb.append(segment, i, segment.length)
+                break
+            }
+            sb.append(segment, i, m.range.first)
+            val innerStart = m.range.last + 1
+            val closeIdx = matchingSpanClose(segment, innerStart)
+            if (closeIdx == -1) {
+                i = segment.length
+            } else {
+                val flat = stripTags(segment.substring(innerStart, closeIdx))
+                if (flat.isNotEmpty()) {
+                    noteTexts.add(flat)
+                    sb.append(fnMark)
+                }
+                i = closeIdx + "</span>".length
+            }
+        }
+        return sb.toString() to noteTexts
+    }
+
+    /** Result of a single body parse: red-aware segments + footnote offsets into the text. */
+    private class ParsedBody(val segments: List<VerseSegment>, val fnOffsets: List<Int>)
+
+    /**
+     * Single pass over one verse's (footnote-free) HTML that produces everything
+     * that has to stay aligned:
+     *  - red/normal [VerseSegment]s (tracking span nesting so a non-wj span inside
+     *    a wj span doesn't end the red region early),
+     *  - the character offset of each [fnMark] into the emitted text,
+     *  - a real '\n' for each [paraMark] (mid-verse paragraph break).
+     * The verse text is the concatenation of the segment texts.
+     */
+    private fun parseBody(html: String): ParsedBody {
+        val segs = mutableListOf<VerseSegment>()
+        val cur = StringBuilder()
+        var curRed = false
+        var spanDepth = 0
+        var inWj = false
+        var wjCloseDepth = -1
+        var lastWasSpace = true
+        var emitted = 0
+        val offsets = mutableListOf<Int>()
+
+        fun flush() { if (cur.isNotEmpty()) { segs.add(VerseSegment(cur.toString(), curRed)); cur.setLength(0) } }
+        fun setRed(red: Boolean) { if (red != curRed) { flush(); curRed = red } }
+        fun emitChar(c: Char) {
+            if (c.isWhitespace()) {
+                if (!lastWasSpace) { cur.append(' '); lastWasSpace = true; emitted++ }
+            } else { cur.append(c); lastWasSpace = false; emitted++ }
+        }
+
+        var i = 0
+        while (i < html.length) {
+            val c = html[i]
+            when (c) {
+                '<' -> {
+                    val gt = html.indexOf('>', i)
+                    val end = if (gt == -1) html.length else gt + 1
+                    val tag = html.substring(i, end)
+                    if (tag.startsWith("</")) {
+                        if (tag.startsWith("</span")) {
+                            if (spanDepth > 0) spanDepth--
+                            if (inWj && spanDepth == wjCloseDepth) { inWj = false; setRed(false) }
+                        }
+                    } else if (tag.startsWith("<span")) {
+                        if (isWjOpen(tag) && !inWj) { inWj = true; wjCloseDepth = spanDepth; setRed(true) }
+                        spanDepth++
+                    }
+                    i = end
+                }
+                fnMark -> { offsets.add(emitted); i++ }
+                paraMark -> {
+                    while (cur.isNotEmpty() && cur.last() == ' ') { cur.deleteCharAt(cur.length - 1); emitted-- }
+                    if (emitted > 0) { cur.append('\n'); emitted++; lastWasSpace = true }
+                    i++
+                }
+                '&' -> {
+                    val semi = html.indexOf(';', i)
+                    val rep = if (semi != -1 && semi - i <= 5) when (html.substring(i, semi + 1)) {
+                        "&nbsp;" -> " "
+                        "&amp;"  -> "&"
+                        "&quot;" -> "\""
+                        "&#39;"  -> "'"
+                        else     -> null
+                    } else null
+                    if (rep != null) { for (ch in rep) emitChar(ch); i = semi + 1 } else { emitChar('&'); i++ }
+                }
+                else -> { emitChar(c); i++ }
+            }
+        }
+        flush()
+        if (segs.isNotEmpty()) {
+            val last = segs.last()
+            segs[segs.size - 1] = last.copy(text = last.text.trimEnd())
+            if (segs.last().text.isEmpty()) segs.removeAt(segs.size - 1)
+        }
+        return ParsedBody(segs, offsets)
+    }
+
     private fun parseHtmlPassage(html: String): List<Verse> {
-        val verseMarker = Regex("""<span[^>]+\bv="(\d+)"[^>]*/?>""")
-        val matches = verseMarker.findAll(html).toList()
+        // 1. Drop the printed verse-number labels.
+        var cleaned = html.replace(
+            Regex("""<span class="yv-vlbl">.*?</span>""", RegexOption.DOT_MATCHES_ALL),
+            ""
+        )
+
+        val anchorRe = Regex("""<span class="yv-v" v="(\d+)"></span>""")
+
+        // 2. Section headings: <div class="… yv-h">TEXT</div> sit BETWEEN verses.
+        val headingDiv = Regex("""<div class="[^"]*yv-h[^"]*">(.*?)</div>""", RegexOption.DOT_MATCHES_ALL)
+        val headingFor = HashMap<Int, String>()
+        for (h in headingDiv.findAll(cleaned)) {
+            val htext = stripTags(h.groupValues[1])
+            if (htext.isEmpty()) continue
+            val next = anchorRe.find(cleaned, h.range.last + 1) ?: continue
+            next.groupValues[1].toIntOrNull()?.let { headingFor[it] = htext }
+        }
+        cleaned = cleaned.replace(headingDiv, "")
+
+        // 3. Split on verse anchors and build each verse.
+        val matches = anchorRe.findAll(cleaned).toList()
         val verses = mutableListOf<Verse>()
         for (i in matches.indices) {
-            val num = matches[i].groupValues[1].toIntOrNull() ?: continue
+            val verseNum = matches[i].groupValues[1].toIntOrNull() ?: continue
             val start = matches[i].range.last + 1
-            val end = if (i + 1 < matches.size) matches[i + 1].range.first else html.length
-            val text = html.substring(start, end).cleaned()
-            if (text.isNotEmpty()) verses.add(Verse(num, text))
+            val end = if (i + 1 < matches.size) matches[i + 1].range.first else cleaned.length
+
+            val rawSegment = cleaned.substring(start, end)
+
+            // Pull footnotes out (tags otherwise intact), mark paragraph breaks,
+            // then do ONE body parse that yields text + red segments + offsets.
+            val (noteFreeHtml, noteTexts) = extractFootnotes(rawSegment)
+            val vhtml = noteFreeHtml.replace(paraDivOpen, paraMark.toString())
+            val parsed = parseBody(vhtml)
+
+            val text = parsed.segments.joinToString("") { it.text }
+            if (text.isEmpty()) continue
+
+            val footnotes = noteTexts.mapIndexed { idx, t ->
+                Footnote(t, parsed.fnOffsets.getOrElse(idx) { text.length })
+            }
+            val segs = if (parsed.segments.any { it.isJesus }) parsed.segments else emptyList()
+
+            verses.add(Verse(verseNum, text, footnotes, headingFor[verseNum], segs))
         }
         return verses
     }
 
-    /** Strip verse-label spans, all other HTML tags, then collapse whitespace. */
-    private fun String.cleaned(): String =
-        replace(Regex("""<span[^>]*yv-vlbl[^>]*>\d+</span>"""), "")
-            .replace(Regex("<[^>]+>"), " ")
-            .replace(Regex("\\s+"), " ")
+    private fun stripTags(s: String): String {
+        return s
+            .replace(Regex("""<[^>]+>"""), "")
+            .replace("&nbsp;", " ")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace(Regex("""\s+"""), " ")
             .trim()
+    }
+
+    private fun isWjOpen(tag: String): Boolean =
+        tag.startsWith("<span") && (tag.contains("class=\"wj\"") || tag.contains("class=\"wj "))
 }
 
 /**
  * Chapter counts for the 66-book Protestant canon (same across KJV, NIV, ESV...).
- * Used to answer getChapterCount() for remote translations without an API call.
  */
 private object ChapterCounts {
     private val byUsfm: Map<String, Int> = mapOf(

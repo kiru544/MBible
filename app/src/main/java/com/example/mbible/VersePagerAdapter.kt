@@ -27,13 +27,24 @@ class VersePagerAdapter(
             .inflate(R.layout.item_chapter_page, parent, false)
         return VH(view)
     }
-
+    @Suppress("WrongConstant")
     override fun onBindViewHolder(holder: VH, position: Int) {
         val chapter = position + 1
         holder.textView.text = "Loading…"
 
         lifecycleOwner.lifecycleScope.launch {
             val verses = bibleRepo.getVerses(bookName, testament, chapter)
+
+            // §5H — an empty result on a remote translation usually means the fetch
+            // failed; tell the user instead of showing a blank page.
+            if (verses.isEmpty()) {
+                holder.textView.text = if (bibleRepo.lastRemoteError != null)
+                    "Couldn't load this chapter.\nCheck your connection and try again."
+                else
+                    "No verses found."
+                return@launch
+            }
+
             val adapter = VerseAdapter(verses)
             holder.textView.text = adapter.buildSpannable(holder.itemView.context)
             // Justify the column on Android 8+ (falls back to left-aligned below).
@@ -41,6 +52,14 @@ class VersePagerAdapter(
                 holder.textView.justificationMode =
                     android.text.Layout.JUSTIFICATION_MODE_INTER_WORD
             }
+            // Make the footnote "*" tappable, but only when this chapter actually
+            // has footnotes — leaves KJV / footnote-free chapters untouched.
+            if (verses.any { it.footnotes.isNotEmpty() }) {
+                holder.textView.movementMethod =
+                    android.text.method.LinkMovementMethod.getInstance()
+                holder.textView.highlightColor = android.graphics.Color.TRANSPARENT
+            }
+
         }
     }
 

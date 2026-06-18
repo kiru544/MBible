@@ -5,16 +5,16 @@ import android.content.Context
 /**
  * Public façade used by Fragments / ViewModels.
  *
- * Replaces the previous concrete-SQLite implementation. Picks a [BibleSource]
- * based on which translation the user has active in [TranslationPrefs],
- * then delegates every read.
+ * Picks a [BibleSource] based on which translation the user has active in
+ * [TranslationPrefs], then delegates every read.
  *
  * Behaviour notes:
- * - Methods are now `suspend`. Call them from `lifecycleScope.launch { ... }`
- *   or from a ViewModel scope. (Previous synchronous calls on the main
- *   thread were doing I/O on the UI thread anyway — this is an upgrade.)
- * - The active translation can change at runtime; the next call will use the
- *   new one.
+ * - Methods are `suspend`. Call them from `lifecycleScope.launch { ... }`
+ *   or a ViewModel scope.
+ * - The active source is cached and only rebuilt when the active translation
+ *   id changes, so reading [lastRemoteError] no longer constructs anything.
+ * - Build this once (see MBibleApp) and share it; LocalBibleSource opens the
+ *   bundled DB lazily on first query.
  */
 class BibleRepository(private val context: Context) {
 
@@ -24,27 +24,33 @@ class BibleRepository(private val context: Context) {
     // Created lazily so apps with no remote translation never open the cache DB.
     private val cache: ChapterCache by lazy { ChapterCache(context) }
 
-    /**
-     * One remote source per translation id. Cached so we don't rebuild the
-     * SDK plumbing on every call.
-     */
+    /** One remote source per translation id, so SDK plumbing isn't rebuilt per call. */
     private val remoteSources = mutableMapOf<String, RemoteBibleSource>()
+
+    // Cache the active source so property reads (lastRemoteError) have no side effects.
+    @Volatile private var cachedSource: BibleSource? = null
+    @Volatile private var cachedTranslationId: String? = null
 
     private fun activeSource(): BibleSource {
         val t = prefs.activeTranslation
+        if (t.id == cachedTranslationId) cachedSource?.let { return it }
         val src: BibleSource = when (t.kind) {
             Translation.Kind.LOCAL -> local
             Translation.Kind.REMOTE -> remoteSources.getOrPut(t.id) {
                 RemoteBibleSource(t, cache)
             }
         }
+        cachedSource = src
+        cachedTranslationId = t.id
         return src
     }
 
     val activeTranslation: Translation get() = prefs.activeTranslation
-    /** Most recent error from a remote source, or null. UI checks this after a fetch returns empty. */
+
+    /** Most recent error from the active remote source, or null. No construction here. */
     val lastRemoteError: Exception?
-        get() = (activeSource() as? RemoteBibleSource)?.lastError
+        get() = (cachedSource as? RemoteBibleSource)?.lastError
+
     fun setActiveTranslation(id: String) {
         prefs.activeTranslationId = id
     }
@@ -70,4 +76,15 @@ class BibleRepository(private val context: Context) {
 
     suspend fun verseExists(bookName: String, chapter: Int, verse: Int): Boolean =
         activeSource().verseExists(bookName, chapter, verse)
+
+    // --- Local-only validation (used by note highlighting) --------------
+    // The canon (books + chapter/verse counts) is identical across translations,
+    // so reference validation always uses the bundled local source and never the
+    // network. Verse *text* still comes from the active translation above.
+
+    suspend fun verseExistsLocal(bookName: String, chapter: Int, verse: Int): Boolean =
+        local.verseExists(bookName, chapter, verse)
+
+    suspend fun getVerseCountLocal(bookName: String, chapter: Int): Int =
+        local.getVerseCount(bookName, chapter)
 }

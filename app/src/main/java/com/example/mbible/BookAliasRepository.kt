@@ -2,75 +2,71 @@ package com.example.mbible
 
 import android.content.ContentValues
 import android.content.Context
-import com.example.mbible.data.NotesDbHelper
 import com.example.mbible.data.BibleBooks
+import com.example.mbible.data.NotesDbHelper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class BookAliasRepository(context: Context) {
-    private val helper = NotesDbHelper(context)
+    private val helper = NotesDbHelper(context.applicationContext)
+    private val canonicalBooks = BibleBooks.ALL
 
-    fun getAliasesForBook(book: String): List<String> {
-        val db = helper.readableDatabase
+    suspend fun getAliasesForBook(book: String): List<String> = withContext(Dispatchers.IO) {
         val out = mutableListOf<String>()
-        val c = db.rawQuery(
+        helper.readableDatabase.rawQuery(
             "SELECT alias FROM book_aliases WHERE canonical_book=? ORDER BY alias",
             arrayOf(book)
-        )
-        c.use {
-            while (it.moveToNext()) out.add(it.getString(0))
-        }
-        return out
+        ).use { while (it.moveToNext()) out.add(it.getString(0)) }
+        out
     }
 
-    fun addAlias(book: String, aliasRaw: String): Boolean {
-        val alias = normalize(aliasRaw)
-        if (alias.isEmpty()) return false
+    // Load every book's aliases in one query — used by the Settings list so it
+    // doesn't fire a query per row while scrolling (review §2 / performance).
+    suspend fun getAllAliases(): Map<String, List<String>> = withContext(Dispatchers.IO) {
+        val map = HashMap<String, MutableList<String>>()
+        helper.readableDatabase.rawQuery(
+            "SELECT canonical_book, alias FROM book_aliases ORDER BY alias", null
+        ).use { c ->
+            while (c.moveToNext()) {
+                map.getOrPut(c.getString(0)) { mutableListOf() }.add(c.getString(1))
+            }
+        }
+        map
+    }
 
-        val db = helper.writableDatabase
-        return try {
+    suspend fun addAlias(book: String, aliasRaw: String): Boolean = withContext(Dispatchers.IO) {
+        val alias = normalize(aliasRaw)
+        if (alias.isEmpty()) return@withContext false
+        try {
             val values = ContentValues().apply {
                 put("canonical_book", book)
                 put("alias", alias)
             }
-            db.insertOrThrow("book_aliases", null, values)
+            helper.writableDatabase.insertOrThrow("book_aliases", null, values)
             true
         } catch (_: Exception) {
-            false // alias already exists (unique index) or other constraint
+            false // unique‑index violation or other constraint
         }
     }
 
-    fun deleteAlias(aliasRaw: String) {
-        val alias = normalize(aliasRaw)
-        val db = helper.writableDatabase
-        db.delete("book_aliases", "alias=?", arrayOf(alias))
+    suspend fun deleteAlias(aliasRaw: String) {
+        withContext(Dispatchers.IO) {
+            helper.writableDatabase.delete("book_aliases", "alias=?", arrayOf(normalize(aliasRaw)))
+        }
+    }
+
+    suspend fun resolveBookToken(tokenRaw: String): String? = withContext(Dispatchers.IO) {
+        val token = normalize(tokenRaw)
+        if (token.isEmpty()) return@withContext null
+
+        helper.readableDatabase.rawQuery(
+            "SELECT canonical_book FROM book_aliases WHERE alias=? LIMIT 1",
+            arrayOf(token)
+        ).use { if (it.moveToFirst()) return@withContext it.getString(0) }
+
+        canonicalBooks.firstOrNull { normalize(it) == token }
     }
 
     fun normalize(s: String): String =
-        s.trim().lowercase()
-            .replace(" ", "")
-            .replace(".", "")
-
-    fun resolveBookToken(tokenRaw: String): String? {
-        val token = normalize(tokenRaw)
-        if (token.isEmpty()) return null
-
-        // 1) try alias table
-        val db = helper.readableDatabase
-        val c = db.rawQuery(
-            "SELECT canonical_book FROM book_aliases WHERE alias=? LIMIT 1",
-            arrayOf(token)
-        )
-        c.use { if (it.moveToFirst()) return it.getString(0) }
-
-        // 2) fallback: match canonical book names (john, 1corinthians, songofsolomon...)
-        // We use a fixed list because canonical books aren't stored in this DB.
-        for (book in CANONICAL_BOOKS) {
-            if (normalize(book) == token) return book
-        }
-
-        return null
-    }
-
-    // Put this inside BookAliasRepository class
-    private val CANONICAL_BOOKS = BibleBooks.ALL
+        s.trim().lowercase().replace(" ", "").replace(".", "")
 }
-

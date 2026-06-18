@@ -21,7 +21,9 @@ import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.example.mbible.data.BibleRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.example.mbible.data.Note
 import com.example.mbible.data.NotesRepository
 
@@ -44,21 +46,29 @@ class NoteEditorFragment : Fragment() {
     private lateinit var verseHighlightScroll: View
     private lateinit var verseHighlightBox: android.widget.LinearLayout
 
-
     // Lets the user choose where to save the single-note export. No storage permission needed.
     private val exportLauncher = registerForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")
     ) { uri ->
         val id = currentNoteId
         if (uri == null || id == null) return@registerForActivityResult
-        try {
-            val json = notesRepo.exportOneToJson(id)
-            requireContext().contentResolver.openOutputStream(uri)?.use { out ->
-                out.write(json.toByteArray())
+        // WRAP (§2) — exportOneToJson() + file write are now off the main thread.
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val json = notesRepo.exportOneToJson(id)
+                withContext(Dispatchers.IO) {
+                    requireContext().contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(json.toByteArray())
+                    }
+                }
+                android.widget.Toast.makeText(
+                    requireContext(), "Note exported", android.widget.Toast.LENGTH_SHORT
+                ).show()
+            } catch (e: Exception) {
+                android.widget.Toast.makeText(
+                    requireContext(), "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG
+                ).show()
             }
-            android.widget.Toast.makeText(requireContext(), "Note exported", android.widget.Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            android.widget.Toast.makeText(requireContext(), "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
         }
     }
 
@@ -79,10 +89,15 @@ class NoteEditorFragment : Fragment() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        notesRepo = NotesRepository(requireContext())
-        bibleRepo = BibleRepository(requireContext())
-        aliasRepo = BookAliasRepository(requireContext())
-        currentNoteId = arguments?.getLong(ARG_NOTE_ID)
+        // §3 — shared singletons instead of per-fragment instances.
+        notesRepo = requireContext().app.notesRepository
+        bibleRepo = requireContext().app.bibleRepository
+        aliasRepo = requireContext().app.aliasRepository
+        // §1 — getLong() returns 0L (not null) when the key is missing; gate on the key
+        // so currentNoteId is genuinely null for a brand-new editor.
+        currentNoteId = arguments
+            ?.takeIf { it.containsKey(ARG_NOTE_ID) }
+            ?.getLong(ARG_NOTE_ID)
     }
 
     override fun onCreateView(
@@ -107,10 +122,12 @@ class NoteEditorFragment : Fragment() {
         verseHighlightScroll = view.findViewById(R.id.verseHighlightScroll)
         verseHighlightBox = view.findViewById(R.id.verseHighlightBox)
 
-        // Load note
+        // Load note — WRAP (§2): getById() is now suspend.
         currentNoteId?.let { id ->
-            val note = notesRepo.getById(id)
-            if (note != null) loadNote(note)
+            viewLifecycleOwner.lifecycleScope.launch {
+                val note = notesRepo.getById(id)
+                if (note != null) loadNote(note)
+            }
         }
 
         noteBody.addTextChangedListener(object : TextWatcher {
@@ -131,8 +148,11 @@ class NoteEditorFragment : Fragment() {
         })
 
         btnSaveNote.setOnClickListener {
-            saveNote()
-            parentFragmentManager.popBackStack()
+            // WRAP (§2) — saveNote() is now suspend.
+            viewLifecycleOwner.lifecycleScope.launch {
+                saveNote()
+                parentFragmentManager.popBackStack()
+            }
         }
 
         // Back chevron returns to the notes list (same as system back).
@@ -142,11 +162,13 @@ class NoteEditorFragment : Fragment() {
 
         // Export just this note via the system file picker (no permissions needed).
         view.findViewById<View>(R.id.btnExportNote).setOnClickListener {
-            saveNote()
-            val safeName = noteTitleText.text.toString().trim()
-                .replace(Regex("[^A-Za-z0-9 _-]"), "")
-                .ifEmpty { "note" }
-            exportLauncher.launch("$safeName.json")
+            viewLifecycleOwner.lifecycleScope.launch {
+                saveNote()
+                val safeName = noteTitleText.text.toString().trim()
+                    .replace(Regex("[^A-Za-z0-9 _-]"), "")
+                    .ifEmpty { "note" }
+                exportLauncher.launch("$safeName.json")
+            }
         }
 
         noteTitleText.setOnClickListener { startTitleEdit() }
@@ -162,6 +184,20 @@ class NoteEditorFragment : Fragment() {
         }
     }
 
+    // §4 — Autosave so edits survive system-back, app-switch, or process death.
+    // Runs on the app scope (not the view scope) so the write completes even as
+    // this fragment's view is being destroyed.
+    override fun onPause() {
+        super.onPause()
+        val id = currentNoteId ?: return
+        if (noteTitleEdit.visibility == View.VISIBLE) finishTitleEdit()
+        val title = noteTitleText.text.toString().trim().ifEmpty { "New Note" }
+        val body = noteBody.text.toString()
+        requireContext().app.appScope.launch {
+            notesRepo.update(id, title, body)
+        }
+    }
+
     private fun loadNote(note: Note) {
         noteTitleText.text = note.title
         noteTitleEdit.setText(note.title)
@@ -174,7 +210,8 @@ class NoteEditorFragment : Fragment() {
         }
     }
 
-    private fun saveNote() {
+    // §2/§4 — now suspend so callers run it inside a coroutine.
+    private suspend fun saveNote() {
         val id = currentNoteId ?: return
         if (noteTitleEdit.visibility == View.VISIBLE) finishTitleEdit()
         val title = noteTitleText.text.toString().trim().ifEmpty { "New Note" }
@@ -220,16 +257,18 @@ class NoteEditorFragment : Fragment() {
                 val ch = chapterStr.toIntOrNull() ?: continue
                 val isFullChapter = verseStartStr.isBlank()
                 val vsStart = if (isFullChapter) 1 else verseStartStr.toIntOrNull() ?: continue
+                // §5F — validate against the bundled canon (instant, offline) instead of
+                // the active translation, so typing never triggers a network call.
                 val vsEnd = when {
-                    isFullChapter -> bibleRepo.getVerseCount(canonical, ch)
+                    isFullChapter -> bibleRepo.getVerseCountLocal(canonical, ch)
                     verseEndStr.isNotBlank() -> verseEndStr.toIntOrNull() ?: vsStart
                     else -> vsStart
                 }
 
                 if (ch <= 0 || vsStart <= 0 || vsEnd <= 0 || vsEnd < vsStart) continue
                 if (!isFullChapter) {
-                    if (!bibleRepo.verseExists(canonical, ch, vsStart)) continue
-                    if (!bibleRepo.verseExists(canonical, ch, vsEnd)) continue
+                    if (!bibleRepo.verseExistsLocal(canonical, ch, vsStart)) continue
+                    if (!bibleRepo.verseExistsLocal(canonical, ch, vsEnd)) continue
                 }
 
                 val start = m.range.first
@@ -263,6 +302,7 @@ class NoteEditorFragment : Fragment() {
             }
         }
     }
+
     private suspend fun updateHighlightBox(editable: Editable) {
         verseHighlightBox.removeAllViews()
         val refs = mutableListOf<Triple<String, Int, Pair<Int,Int>>>() // canonical, chapter, verse range
@@ -277,16 +317,17 @@ class NoteEditorFragment : Fragment() {
             val ch = chapterStr.toIntOrNull() ?: continue
             val isFullChapter = verseStartStr.isBlank()
             val vsStart = if (isFullChapter) 1 else verseStartStr.toIntOrNull() ?: continue
+            // §5F — local validation here too.
             val vsEnd = when {
-                isFullChapter -> bibleRepo.getVerseCount(canonical, ch)
+                isFullChapter -> bibleRepo.getVerseCountLocal(canonical, ch)
                 verseEndStr.isNotBlank() -> verseEndStr.toIntOrNull() ?: vsStart
                 else -> vsStart
             }
 
             if (ch <= 0 || vsStart <= 0 || vsEnd <= 0 || vsEnd < vsStart) continue
             if (!isFullChapter) {
-                if (!bibleRepo.verseExists(canonical, ch, vsStart)) continue
-                if (!bibleRepo.verseExists(canonical, ch, vsEnd)) continue
+                if (!bibleRepo.verseExistsLocal(canonical, ch, vsStart)) continue
+                if (!bibleRepo.verseExistsLocal(canonical, ch, vsEnd)) continue
             }
 
             refs.add(Triple(canonical, ch, Pair(vsStart, vsEnd)))

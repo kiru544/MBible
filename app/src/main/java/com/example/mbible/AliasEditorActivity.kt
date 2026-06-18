@@ -4,7 +4,9 @@ import android.app.AlertDialog
 import android.os.Bundle
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import com.example.mbible.BookAliasRepository
+import kotlinx.coroutines.launch
 
 class AliasEditorActivity : AppCompatActivity() {
 
@@ -33,6 +35,7 @@ class AliasEditorActivity : AppCompatActivity() {
         setContentView(R.layout.activity_alias_editor)
         ThemeManager.applyStatusBarIcons(this)
 
+        // After Section 3 you can swap this for: app.aliasRepository
         aliasRepo = BookAliasRepository(this)
         book = intent.getStringExtra(EXTRA_BOOK) ?: "Book"
 
@@ -68,8 +71,11 @@ class AliasEditorActivity : AppCompatActivity() {
                     .setTitle("Delete short name?")
                     .setMessage("Remove \u201C$alias\u201D from $book?")
                     .setPositiveButton("Delete") { _, _ ->
-                        aliasRepo.deleteAlias(alias)
-                        loadAliases()
+                        // WRAP — deleteAlias() is now suspend
+                        lifecycleScope.launch {
+                            aliasRepo.deleteAlias(alias)
+                            loadAliases()
+                        }
                     }
                     .setNegativeButton("Cancel", null)
                     .show()
@@ -83,21 +89,33 @@ class AliasEditorActivity : AppCompatActivity() {
             val raw = aliasInput.text.toString().trim()
             if (raw.isEmpty()) return@setOnClickListener
 
-            val ok = aliasRepo.addAlias(book, raw)
-            if (!ok) {
-                Toast.makeText(this, "Alias already exists or invalid", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
+            // WRAP — addAlias() is now suspend (returns Boolean)
+            lifecycleScope.launch {
+                val ok = aliasRepo.addAlias(book, raw)
+                if (!ok) {
+                    // NB: inside launch, `this` is the coroutine scope — qualify the Activity.
+                    Toast.makeText(
+                        this@AliasEditorActivity,
+                        "Alias already exists or invalid",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    return@launch
+                }
+                aliasInput.setText("")
+                loadAliases()
             }
-
-            aliasInput.setText("")
-            loadAliases()
         }
     }
 
     private fun loadAliases() {
-        aliases.clear()
-        aliases.addAll(aliasRepo.getAliasesForBook(book))
-        adapter.notifyDataSetChanged()
-        aliasCountLabel.text = "\u25C6 SHORT NAMES \u00B7 ${aliases.size}"
+        // WRAP — getAliasesForBook() is now suspend. Fetch first, then touch the
+        // list + views (back on the main thread automatically).
+        lifecycleScope.launch {
+            val result = aliasRepo.getAliasesForBook(book)
+            aliases.clear()
+            aliases.addAll(result)
+            adapter.notifyDataSetChanged()
+            aliasCountLabel.text = "\u25C6 SHORT NAMES \u00B7 ${aliases.size}"
+        }
     }
 }
