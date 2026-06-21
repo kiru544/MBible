@@ -96,7 +96,7 @@ class VerseAdapter(
                 spannable.append(h)
                 val hEnd = spannable.length
                 spannable.setSpan(StyleSpan(android.graphics.Typeface.BOLD), hStart, hEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                spannable.setSpan(RelativeSizeSpan(1.15f), hStart, hEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                spannable.setSpan(RelativeSizeSpan(1.4f), hStart, hEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 spannable.setSpan(ForegroundColorSpan(numColor), hStart, hEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 spannable.append("\n")
             }
