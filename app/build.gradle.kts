@@ -14,7 +14,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.mbible"
+        applicationId = "bible.notes"
         minSdk = 24
         targetSdk = 36
         versionCode = 1
