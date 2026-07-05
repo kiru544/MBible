@@ -127,6 +127,8 @@ KJV and the Catechism work out of the box. For NIV and other remote translations
 
 * Design the book covers.
 * Better Design note layouts
+   - Zoom in/out
+   - Add headlines
 
 ### Small
 
