@@ -88,11 +88,15 @@ class RemoteBibleSource(
 
     private val footnoteOpen = Regex("""<span class="[^"]*\byv-n\b[^"]*"[^>]*>""")
     private val spanToken    = Regex("""<span\b[^>]*>|</span>""")
-    private val paraDivOpen  = Regex("""<div class="p">""")
+    private val paraDivOpen  = Regex("""<div class="(?:p|m)">""")
+    private val q1DivOpen    = Regex("""<div class="q1">""")   // poetry line, flush left
+    private val q2DivOpen    = Regex("""<div class="q[2-4]">""") // poetry line, indented
 
     /** Sentinels that survive tag-strip + whitespace-collapse. */
     private val fnMark = '\u0001'     // where a footnote was
     private val paraMark = '\u0002'   // a <div class="p"> paragraph break
+    private val qMark = '\u0003'      // a q1 poetry line break
+    private val q2Mark = '\u0004'     // a q2+ poetry line break (indented)
 
     /**
      * Given the index just AFTER an outer <span ...> open tag, return the index of
@@ -147,7 +151,12 @@ class RemoteBibleSource(
     }
 
     /** Result of a single body parse: red-aware segments + footnote offsets into the text. */
-    private class ParsedBody(val segments: List<VerseSegment>, val fnOffsets: List<Int>)
+    private class ParsedBody(
+        val segments: List<VerseSegment>,
+        val fnOffsets: List<Int>,
+        val leadingBreak: Int, // 0 flow-on, 1 poetry line, 2 paragraph
+        val indent: Boolean    // verse starts on an indented poetry line
+    )
 
     /**
      * Single pass over one verse's (footnote-free) HTML that produces everything
@@ -165,16 +174,37 @@ class RemoteBibleSource(
         var spanDepth = 0
         var inWj = false
         var wjCloseDepth = -1
+        var inNd = false          // inside <span class="nd"> (the divine name)
+        var ndCloseDepth = -1
         var lastWasSpace = true
         var emitted = 0
+        var leadingBreak = 0
+        var leadIndent = false
         val offsets = mutableListOf<Int>()
 
         fun flush() { if (cur.isNotEmpty()) { segs.add(VerseSegment(cur.toString(), curRed)); cur.setLength(0) } }
         fun setRed(red: Boolean) { if (red != curRed) { flush(); curRed = red } }
-        fun emitChar(c: Char) {
+        fun emitChar(c0: Char) {
+            // NIV prints the divine name in small caps; plain text's closest
+            // equivalent is LORD in full caps (the print convention too).
+            val c = if (inNd) c0.uppercaseChar() else c0
             if (c.isWhitespace()) {
                 if (!lastWasSpace) { cur.append(' '); lastWasSpace = true; emitted++ }
             } else { cur.append(c); lastWasSpace = false; emitted++ }
+        }
+        fun lineBreak(indent: Boolean, paragraph: Boolean) {
+            if (emitted == 0) {
+                // The verse ITSELF starts on this new line/paragraph. That break
+                // must land BEFORE the verse number, which this parser never
+                // sees — so record it at verse level for the builder.
+                leadingBreak = maxOf(leadingBreak, if (paragraph) 2 else 1)
+                if (indent) leadIndent = true
+                return
+            }
+            while (cur.isNotEmpty() && cur.last() == ' ') { cur.deleteCharAt(cur.length - 1); emitted-- }
+            cur.append('\n'); emitted++
+            if (indent) { cur.append('\u2002'); cur.append('\u2002'); emitted += 2 } // en-space indent
+            lastWasSpace = true
         }
 
         var i = 0
@@ -189,19 +219,19 @@ class RemoteBibleSource(
                         if (tag.startsWith("</span")) {
                             if (spanDepth > 0) spanDepth--
                             if (inWj && spanDepth == wjCloseDepth) { inWj = false; setRed(false) }
+                            if (inNd && spanDepth == ndCloseDepth) inNd = false
                         }
                     } else if (tag.startsWith("<span")) {
                         if (isWjOpen(tag) && !inWj) { inWj = true; wjCloseDepth = spanDepth; setRed(true) }
+                        if (isNdOpen(tag) && !inNd) { inNd = true; ndCloseDepth = spanDepth }
                         spanDepth++
                     }
                     i = end
                 }
                 fnMark -> { offsets.add(emitted); i++ }
-                paraMark -> {
-                    while (cur.isNotEmpty() && cur.last() == ' ') { cur.deleteCharAt(cur.length - 1); emitted-- }
-                    if (emitted > 0) { cur.append('\n'); emitted++; lastWasSpace = true }
-                    i++
-                }
+                paraMark -> { lineBreak(indent = false, paragraph = true); i++ }
+                qMark -> { lineBreak(indent = false, paragraph = false); i++ }
+                q2Mark -> { lineBreak(indent = true, paragraph = false); i++ }
                 '&' -> {
                     val semi = html.indexOf(';', i)
                     val rep = if (semi != -1 && semi - i <= 5) when (html.substring(i, semi + 1)) {
@@ -222,7 +252,7 @@ class RemoteBibleSource(
             segs[segs.size - 1] = last.copy(text = last.text.trimEnd())
             if (segs.last().text.isEmpty()) segs.removeAt(segs.size - 1)
         }
-        return ParsedBody(segs, offsets)
+        return ParsedBody(segs, offsets, leadingBreak, leadIndent)
     }
 
     private fun parseHtmlPassage(html: String): List<Verse> {
@@ -234,6 +264,19 @@ class RemoteBibleSource(
 
         val anchorRe = Regex("""<span class="yv-v" v="(\d+)"></span>""")
 
+        // 1b. Psalm superscriptions: <div class="d">A psalm of David.</div> sits
+        // BEFORE the verse-1 anchor, so anchor-splitting silently dropped it.
+        // Capture it for the verse that follows, then strip the div.
+        val superDiv = Regex("""<div class="d">(.*?)</div>""", RegexOption.DOT_MATCHES_ALL)
+        val superFor = HashMap<Int, String>()
+        for (m in superDiv.findAll(cleaned)) {
+            val dtext = stripTags(m.groupValues[1])
+            if (dtext.isEmpty()) continue
+            val next = anchorRe.find(cleaned, m.range.last + 1) ?: continue
+            next.groupValues[1].toIntOrNull()?.let { superFor[it] = dtext }
+        }
+        cleaned = cleaned.replace(superDiv, "")
+
         // 2. Section headings: <div class="… yv-h">TEXT</div> sit BETWEEN verses.
         val headingDiv = Regex("""<div class="[^"]*yv-h[^"]*">(.*?)</div>""", RegexOption.DOT_MATCHES_ALL)
         val headingFor = HashMap<Int, String>()
@@ -244,6 +287,25 @@ class RemoteBibleSource(
             next.groupValues[1].toIntOrNull()?.let { headingFor[it] = htext }
         }
         cleaned = cleaned.replace(headingDiv, "")
+
+        // 2b. Structure sentinels: paragraph and poetry-line div opens become
+        // control characters that survive tag stripping. Without the poetry
+        // ones, adjacent lines like "...pastures,</div><div class="q1">he leads"
+        // fused into "pastures,he leads" — no break, not even a space.
+        cleaned = cleaned
+            .replace(paraDivOpen, paraMark.toString())
+            .replace(q1DivOpen, qMark.toString())
+            .replace(q2DivOpen, q2Mark.toString())
+        // A div opening a new line usually opens BEFORE the verse anchor
+        // (<div class="q1"><span class="yv-v" v="1">...). Splitting on anchors
+        // would hand that sentinel to the PREVIOUS verse's tail, where it gets
+        // trimmed away — so swap each sentinel to just AFTER its anchor, making
+        // every verse own its leading break.
+        val sentinelBeforeAnchor =
+            Regex("([$paraMark$qMark$q2Mark])(<span class=\"yv-v\" v=\"\\d+\"></span>)")
+        cleaned = cleaned.replace(sentinelBeforeAnchor) { m ->
+            m.groupValues[2] + m.groupValues[1]
+        }
 
         // 3. Split on verse anchors and build each verse.
         val matches = anchorRe.findAll(cleaned).toList()
@@ -258,8 +320,7 @@ class RemoteBibleSource(
             // Pull footnotes out (tags otherwise intact), mark paragraph breaks,
             // then do ONE body parse that yields text + red segments + offsets.
             val (noteFreeHtml, noteTexts) = extractFootnotes(rawSegment)
-            val vhtml = noteFreeHtml.replace(paraDivOpen, paraMark.toString())
-            val parsed = parseBody(vhtml)
+            val parsed = parseBody(noteFreeHtml) // sentinels already substituted above
 
             val text = parsed.segments.joinToString("") { it.text }
             if (text.isEmpty()) continue
@@ -269,7 +330,18 @@ class RemoteBibleSource(
             }
             val segs = if (parsed.segments.any { it.isJesus }) parsed.segments else emptyList()
 
-            verses.add(Verse(verseNum, text, footnotes, headingFor[verseNum], segs))
+            verses.add(
+                Verse(
+                    verse = verseNum,
+                    text = text,
+                    footnotes = footnotes,
+                    heading = headingFor[verseNum],
+                    segments = segs,
+                    superscription = superFor[verseNum],
+                    leadingBreak = parsed.leadingBreak,
+                    indent = parsed.indent
+                )
+            )
         }
         return verses
     }
@@ -287,6 +359,9 @@ class RemoteBibleSource(
 
     private fun isWjOpen(tag: String): Boolean =
         tag.startsWith("<span") && (tag.contains("class=\"wj\"") || tag.contains("class=\"wj "))
+
+    private fun isNdOpen(tag: String): Boolean =
+        tag.startsWith("<span") && (tag.contains("class=\"nd\"") || tag.contains("class=\"nd "))
 }
 
 /**

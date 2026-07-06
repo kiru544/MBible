@@ -56,6 +56,10 @@ class ChapterCache(context: Context) :
                 for (seg in v.segments) segArr.put(JSONObject().put("s", seg.text).put("j", seg.isJesus))
                 o.put("seg", segArr)
             }
+            // NIV formatting — only written when non-default, keeping old rows small.
+            if (v.superscription != null) o.put("d", v.superscription)
+            if (v.leadingBreak != 0) o.put("lb", v.leadingBreak)
+            if (v.indent) o.put("in", true)
             arr.put(o)   // add only after o is fully populated
         }
         val values = ContentValues().apply {
@@ -115,14 +119,21 @@ class ChapterCache(context: Context) :
                 }
             }
 
-            out.add(Verse(o.getInt("n"), verseText, notes, heading, segs))
+            out.add(
+                Verse(
+                    o.getInt("n"), verseText, notes, heading, segs,
+                    superscription = if (o.has("d")) o.getString("d") else null,
+                    leadingBreak = o.optInt("lb", 0),
+                    indent = o.optBoolean("in", false)
+                )
+            )
         }
         return out
     }
 
     companion object {
         private const val DB_NAME = "remote_bible_cache.db"
-        private const val DB_VERSION = 5
+        private const val DB_VERSION = 6 // v6: superscription/leadingBreak/indent (drops stale parses)
         private const val CREATE_TABLE = """
             CREATE TABLE IF NOT EXISTS chapter_cache (
                 version_id INTEGER NOT NULL,
