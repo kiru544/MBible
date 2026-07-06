@@ -8,9 +8,11 @@
     android:background="@color/bg_primary"
     android:paddingHorizontal="@dimen/screen_padding_h"
     android:paddingTop="10dp"
-    android:paddingBottom="10dp">
+    android:paddingBottom="6dp">
 
-    <!-- Chrome: back chevron + centered title + accent Save -->
+    <!-- Redesign: header is now ONLY back + title, so the title gets the full
+         line (long titles wrap instead of fighting Share/Save for space).
+         Share/Save moved to the bottom bar next to the formatting tools. -->
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -36,9 +38,9 @@
 
             <TextView
                 android:id="@+id/noteTitleText"
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center"
+                android:layout_gravity="start|center_vertical"
                 android:text="New Note"
                 android:fontFamily="@font/spectral_semibold"
                 android:textColor="@color/text_primary"
@@ -51,10 +53,10 @@
                 android:id="@+id/noteTitleEdit"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center"
+                android:layout_gravity="start|center_vertical"
                 android:visibility="gone"
                 android:singleLine="true"
-                android:gravity="center"
+                android:gravity="start"
                 android:textColor="@color/text_primary"
                 android:textColorHint="@color/text_secondary"
                 android:fontFamily="@font/spectral_semibold"
@@ -63,6 +65,37 @@
                 android:background="@android:color/transparent"
                 android:padding="6dp" />
         </FrameLayout>
+    </LinearLayout>
+
+    <!-- Redesign: verse chips + Share + Save share one row under the title.
+         The chip scroller has weight=1 so it takes all leftover width; when
+         no verses are referenced it's GONE, and the row's gravity="end" packs
+         Share/Save neatly to the right on their own. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical|end"
+        android:layout_marginBottom="10dp">
+
+        <HorizontalScrollView
+            android:id="@+id/verseHighlightScroll"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:visibility="gone"
+            android:scrollbars="none"
+            android:requiresFadingEdge="horizontal"
+            android:fadingEdgeLength="28dp"
+            android:layout_marginEnd="6dp">
+
+            <LinearLayout
+                android:id="@+id/verseHighlightBox"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"/>
+        </HorizontalScrollView>
 
         <ImageButton
             android:id="@+id/btnExportNote"
@@ -90,24 +123,7 @@
             app:cornerRadius="12dp" />
     </LinearLayout>
 
-    <!-- Reference chips -->
-    <HorizontalScrollView
-        android:id="@+id/verseHighlightScroll"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:visibility="gone"
-        android:scrollbars="none"
-        android:layout_marginBottom="10dp">
-
-        <LinearLayout
-            android:id="@+id/verseHighlightBox"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"/>
-    </HorizontalScrollView>
-
-    <!-- Note body -->
+    <!-- Note body fills everything between the chips and the bottom bar -->
     <EditText
         android:id="@+id/noteBody"
         android:layout_width="match_parent"
@@ -119,8 +135,64 @@
         android:textColorHint="@color/text_tertiary"
         android:fontFamily="@font/spectral_regular"
         android:textSize="17sp"
-        android:lineSpacingMultiplier="1.55"
+        android:lineSpacingExtra="9sp"
         android:background="@android:color/transparent"
         android:paddingVertical="4dp" />
+
+    <!-- Bottom bar: formatting tools only (Share/Save moved up beside the
+         verse chips). Rides on top of the keyboard via MainActivity's IME
+         insets handling. -->
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:scrollbars="none"
+        android:requiresFadingEdge="horizontal"
+        android:fadingEdgeLength="28dp"
+        android:paddingTop="8dp">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:id="@+id/btnFmtStyle"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_style" />
+
+            <TextView
+                android:id="@+id/btnFmtBold"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_bold"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/btnFmtItalic"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_italic"
+                android:textStyle="italic" />
+
+            <TextView
+                android:id="@+id/btnFmtUnderline"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_underline" />
+
+            <TextView
+                android:id="@+id/btnFmtAlign"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_align" />
+
+            <TextView
+                android:id="@+id/btnFmtImage"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_image" />
+
+            <TextView
+                android:id="@+id/btnFmtDraw"
+                style="@style/FormatToolbarButton"
+                android:text="@string/fmt_draw" />
+        </LinearLayout>
+    </HorizontalScrollView>
 
 </LinearLayout>

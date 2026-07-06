@@ -7,33 +7,21 @@ import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.StyleSpan
 import android.text.style.SuperscriptSpan
-import android.view.LayoutInflater
 import android.view.View
-import android.view.ViewGroup
-import android.widget.TextView
-import androidx.recyclerview.widget.RecyclerView
 import com.example.mbible.data.Verse
-import com.example.mbible.data.VerseSegment
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
-class VerseAdapter(
+/**
+ * Improvement #7 — formerly "VerseAdapter", a RecyclerView.Adapter with
+ * itemCount = 1 whose only real job was buildSpannable(). The adapter
+ * machinery (VH / onCreateViewHolder / onBindViewHolder) was never used as a
+ * list, so this is now a plain builder class: give it a chapter's verses and
+ * it produces the styled Spannable (verse numbers, headings, red-letter
+ * segments, tappable footnote markers).
+ */
+class ChapterSpannableBuilder(
     private val verses: List<Verse>
-) : RecyclerView.Adapter<VerseAdapter.VH>() {
-
-    class VH(val textView: TextView) : RecyclerView.ViewHolder(textView)
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-        val view = LayoutInflater.from(parent.context)
-            .inflate(R.layout.item_verse, parent, false) as TextView
-        return VH(view)
-    }
-
-    override fun onBindViewHolder(holder: VH, position: Int) {
-        // Only one item — the whole chapter as one paragraph
-    }
-
-    override fun getItemCount() = 1
-
+) {
     private val letters = "abcdefghijklmnopqrstuvwxyz"
 
     /** Insert dimmed superscript a/b/c markers into [sb] at each footnote's offset. */
@@ -144,9 +132,12 @@ class VerseAdapter(
                 spannable.setSpan(object : ClickableSpan() {
                     override fun onClick(widget: View) {
                         MaterialAlertDialogBuilder(widget.context, R.style.ThemeOverlay_MBible_Dialog)
-                            .setTitle(if (capturedVerse.footnotes.size > 1) "Footnotes" else "Footnote")
+                            .setTitle(widget.context.getString(
+                                if (capturedVerse.footnotes.size > 1) R.string.footnote_plural
+                                else R.string.footnote_singular
+                            ))
                             .setMessage(buildFootnoteDialogBody(widget.context, capturedVerse))
-                            .setPositiveButton("Close", null)
+                            .setPositiveButton(widget.context.getString(R.string.action_close), null)
                             .show()
                     }
                     override fun updateDrawState(ds: android.text.TextPaint) {

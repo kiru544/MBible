@@ -291,8 +291,12 @@ class RemoteBibleSource(
 
 /**
  * Chapter counts for the 66-book Protestant canon (same across KJV, NIV, ESV...).
+ *
+ * Improvement #6 — made public (was private) so BibleFragment can build its
+ * book-list rows from this static table instead of firing one MAX(chapter)
+ * SQLite query per book (an "N+1 query" — up to 39 sequential round-trips).
  */
-private object ChapterCounts {
+object ChapterCounts {
     private val byUsfm: Map<String, Int> = mapOf(
         "GEN" to 50, "EXO" to 40, "LEV" to 27, "NUM" to 36, "DEU" to 34,
         "JOS" to 24, "JDG" to 21, "RUT" to  4, "1SA" to 31, "2SA" to 24,

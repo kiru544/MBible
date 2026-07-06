@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Image feature: the ONLY location FileProvider is allowed to expose —
+     the cache subfolder where camera captures land temporarily. -->
+<paths>
+    <cache-path name="camera" path="camera/" />
+</paths>
