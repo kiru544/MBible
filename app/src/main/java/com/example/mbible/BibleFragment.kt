@@ -54,6 +54,15 @@ class BibleFragment : Fragment() {
     companion object {
         private const val ARG_TESTAMENT = "testament"
 
+        // Improvement #4 — keys for onSaveInstanceState, so rotation (or the
+        // theme toggle recreating the activity) doesn't dump the reader back
+        // to the book picker.
+        private const val KEY_CARD_MODE = "state_card_mode"
+        private const val KEY_IN_CHAPTERS = "state_in_chapters"
+        private const val KEY_IN_VERSES = "state_in_verses"
+        private const val KEY_BOOK = "state_book"
+        private const val KEY_CHAPTER = "state_chapter"
+
         fun newInstance(testament: String): BibleFragment {
             val fragment = BibleFragment()
             val args = Bundle()
@@ -89,21 +98,21 @@ class BibleFragment : Fragment() {
         bookList = view.findViewById(R.id.bookList)
         bookListContainer = view.findViewById(R.id.bookListContainer)
         bookListHeader = view.findViewById(R.id.bookListHeader)
-        bookListHeader.text = "\u25C6 " + (if (testament == "New") "NEW TESTAMENT" else "OLD TESTAMENT")
+        bookListHeader.text = getString(
+            if (testament == "New") R.string.testament_header_new else R.string.testament_header_old
+        )
         translationPicker = view.findViewById(R.id.translationPicker)
         versePager = view.findViewById(R.id.versePager)
 
         // §5E — register the page-change callback exactly once.
         versePager.registerOnPageChangeCallback(pageChangeCallback)
 
-        // Theme toggle: show the right icon, and flip the theme on tap.
+        // Improvement #5 — ThemeManager.toggleTheme() already recreates the
+        // activity (setDefaultNightMode does it for us), so the old extra
+        // requireActivity().recreate() here caused a double recreation.
+        // bindThemeToggle sets the right icon AND the single-toggle listener.
         btnThemeToggle = view.findViewById(R.id.btnThemeToggle)
-        updateThemeButtonIcon()
-        btnThemeToggle.setOnClickListener {
-            ThemeManager.toggleTheme(requireContext())
-            // Recreate the activity so the new colors are applied everywhere.
-            requireActivity().recreate()
-        }
+        ThemeManager.bindThemeToggle(btnThemeToggle, requireActivity())
 
         updateTranslationLabel()
         translationPicker.setOnClickListener { showTranslationMenu() }
@@ -115,12 +124,17 @@ class BibleFragment : Fragment() {
                 showChapters(bookName)
             }
 
-            // Build rich rows: abbreviation + name + chapter count.
+            // Improvement #6 — the old code called getChapterCount() once per
+            // book: up to 39 sequential DB queries just to draw this list (a
+            // classic N+1). The canon never changes, so read the static
+            // ChapterCounts table instead — zero DB work.
             val rows = books.map { name ->
                 BookListAdapter.BookRow(
                     name = name,
                     abbrev = abbrevFor(name),
-                    chapters = bibleRepo.getChapterCount(name, testament)
+                    chapters = com.example.mbible.data.ChapterCounts.forBook(
+                        com.example.mbible.data.BookMapping.byName(name)?.usfm ?: ""
+                    )
                 )
             }
             bookList.adapter = BookListAdapter(requireContext(), rows)
@@ -141,7 +155,38 @@ class BibleFragment : Fragment() {
             }
         }
 
-        showBookPager()
+        // Improvement #4 — restore where the reader was before recreation.
+        // The old code always called showBookPager(), so any rotation lost
+        // the user's place. showChapters()/showVerses() query the repository
+        // themselves, so they can be re-entered directly with restored args.
+        if (savedInstanceState != null) {
+            isCardMode = savedInstanceState.getBoolean(KEY_CARD_MODE, true)
+            currentBook = savedInstanceState.getString(KEY_BOOK)
+            currentChapter = savedInstanceState.getInt(KEY_CHAPTER, -1)
+                .takeIf { it > 0 }
+        }
+        val restoredBook = currentBook
+        when {
+            savedInstanceState?.getBoolean(KEY_IN_VERSES) == true &&
+                    restoredBook != null && currentChapter != null ->
+                showVerses(restoredBook, currentChapter!!)
+
+            savedInstanceState?.getBoolean(KEY_IN_CHAPTERS) == true &&
+                    restoredBook != null ->
+                showChapters(restoredBook)
+
+            else -> showBookPager()
+        }
+    }
+
+    // Improvement #4 — persist the reader's position across recreation.
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_CARD_MODE, isCardMode)
+        outState.putBoolean(KEY_IN_CHAPTERS, inChaptersView)
+        outState.putBoolean(KEY_IN_VERSES, inVersesView)
+        outState.putString(KEY_BOOK, currentBook)
+        outState.putInt(KEY_CHAPTER, currentChapter ?: -1)
     }
 
     override fun onDestroyView() {
@@ -222,14 +267,6 @@ class BibleFragment : Fragment() {
 
     private fun updateTranslationLabel() {
         translationPicker.text = "${bibleRepo.activeTranslation.abbreviation} ▾"
-    }
-
-    /** Shows the icon for the theme the user will switch TO. */
-    private fun updateThemeButtonIcon() {
-        btnThemeToggle.setImageResource(
-            if (ThemeManager.isDark(requireContext())) R.drawable.ic_sun
-            else R.drawable.ic_moon
-        )
     }
 
     /** 3-char badge label, e.g. "Genesis" -> "Gen", "1 Samuel" -> "1Sa". */

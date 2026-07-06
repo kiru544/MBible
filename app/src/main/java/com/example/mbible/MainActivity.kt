@@ -29,7 +29,17 @@ class MainActivity : AppCompatActivity() {
         val root = findViewById<View>(R.id.rootMain)
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-            v.setPadding(v.paddingLeft, bars.top, v.paddingRight, 0)
+
+            // Keyboard handling: when the IME is open, pad the root by the
+            // keyboard's height so the content shrinks to the space above it —
+            // that's what makes the note editor's bottom formatting bar sit
+            // directly on top of the keyboard. The tab bar is useless while
+            // typing, so it's hidden until the keyboard goes away.
+            val imeVisible = insets.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime())
+            val imeBottom = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime()).bottom
+
+            v.setPadding(v.paddingLeft, bars.top, v.paddingRight, if (imeVisible) imeBottom else 0)
+            bottomNav.visibility = if (imeVisible) View.GONE else View.VISIBLE
             bottomNav.setPadding(
                 bottomNav.paddingLeft, bottomNav.paddingTop, bottomNav.paddingRight, bars.bottom
             )

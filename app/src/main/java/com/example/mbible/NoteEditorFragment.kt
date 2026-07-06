@@ -62,11 +62,11 @@ class NoteEditorFragment : Fragment() {
                     }
                 }
                 android.widget.Toast.makeText(
-                    requireContext(), "Note exported", android.widget.Toast.LENGTH_SHORT
+                    requireContext(), getString(R.string.note_exported), android.widget.Toast.LENGTH_SHORT
                 ).show()
             } catch (e: Exception) {
                 android.widget.Toast.makeText(
-                    requireContext(), "Export failed: ${e.message}", android.widget.Toast.LENGTH_LONG
+                    requireContext(), getString(R.string.export_failed, e.message), android.widget.Toast.LENGTH_LONG
                 ).show()
             }
         }
@@ -121,6 +121,19 @@ class NoteEditorFragment : Fragment() {
 
         verseHighlightScroll = view.findViewById(R.id.verseHighlightScroll)
         verseHighlightBox = view.findViewById(R.id.verseHighlightBox)
+
+        // Pinch-to-zoom on the note body: two fingers scale the base text size,
+        // and the choice is persisted so every note opens at the reader's size.
+        // (Formatting sizes like Title are RELATIVE spans, so they scale along.)
+        TextZoom.applySaved(noteBody, TextZoom.KEY_NOTE)
+        TextZoom.attach(
+            TextZoom.KEY_NOTE,
+            startSp = { TextZoom.currentSp(noteBody) },
+            onScaled = { sp -> noteBody.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, sp) },
+            noteBody
+        )
+
+        bindFormattingToolbar(view)
 
         // Load note — WRAP (§2): getById() is now suspend.
         currentNoteId?.let { id ->
@@ -184,6 +197,184 @@ class NoteEditorFragment : Fragment() {
         }
     }
 
+    // Rich-text feature — the formatting toolbar. B/I/U act directly on the
+    // selection (or the word under the cursor); Style, Size, and Align open
+    // small PopupMenus anchored to their buttons. All of these edit SPANS, not
+    // text, so the TextWatcher (verse highlighting) is never re-triggered.
+    private fun bindFormattingToolbar(view: View) {
+        val dim = requireContext().getColor(R.color.text_tertiary)
+
+        view.findViewById<View>(R.id.btnFmtBold).setOnClickListener {
+            NoteFormatting.toggleBold(noteBody)
+        }
+        view.findViewById<View>(R.id.btnFmtItalic).setOnClickListener {
+            NoteFormatting.toggleItalic(noteBody)
+        }
+        view.findViewById<View>(R.id.btnFmtUnderline).setOnClickListener {
+            NoteFormatting.toggleUnderline(noteBody)
+        }
+
+        view.findViewById<View>(R.id.btnFmtStyle).setOnClickListener { anchor ->
+            val labels = listOf(
+                NoteFormatting.LineStyle.TITLE to R.string.style_title,
+                NoteFormatting.LineStyle.SUBTITLE to R.string.style_subtitle,
+                NoteFormatting.LineStyle.HEADING to R.string.style_heading,
+                NoteFormatting.LineStyle.BODY to R.string.style_body,
+                NoteFormatting.LineStyle.NOTE to R.string.style_note
+            )
+            showPopup(anchor, labels) { style ->
+                NoteFormatting.applyLineStyle(noteBody, style, dim)
+            }
+        }
+
+        view.findViewById<View>(R.id.btnFmtAlign).setOnClickListener { anchor ->
+            val labels = listOf(
+                android.text.Layout.Alignment.ALIGN_NORMAL to R.string.align_left,
+                android.text.Layout.Alignment.ALIGN_CENTER to R.string.align_center,
+                android.text.Layout.Alignment.ALIGN_OPPOSITE to R.string.align_right
+            )
+            showPopup(anchor, labels) { align ->
+                NoteFormatting.setAlignment(noteBody, align)
+            }
+        }
+
+        // Image feature — photos (album or camera) under Image; Draw is its
+        // own button since sketching is a different activity than attaching.
+        view.findViewById<View>(R.id.btnFmtImage).setOnClickListener { anchor ->
+            val labels = listOf(
+                "album" to R.string.image_album,
+                "camera" to R.string.image_camera
+            )
+            showPopup(anchor, labels) { which ->
+                when (which) {
+                    "album" -> pickImageLauncher.launch("image/*")
+                    "camera" -> launchCamera()
+                }
+            }
+        }
+
+        view.findViewById<View>(R.id.btnFmtDraw).setOnClickListener {
+            DrawingDialog(requireContext()) { bmp ->
+                storeAndInsert { NoteImageStore.saveBitmap(appCtx(), bmp) }
+            }.show()
+        }
+    }
+
+    // ------------------------------------------------------------ image feature
+
+    private fun appCtx() = requireContext().applicationContext
+
+    /** Gallery picker: returns a content:// Uri, or null if the user backed out. */
+    private val pickImageLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) storeAndInsert { NoteImageStore.importUri(appCtx(), uri) }
+    }
+
+    // Camera flow: WE create a temp file, wrap it in a FileProvider Uri (apps
+    // can't hand raw file paths to each other since Android 7), and the camera
+    // app writes the photo INTO it. The boolean result just says "did they
+    // actually take a picture".
+    //
+    // Bug fix: the temp file has a FIXED name derived from nothing. While the
+    // camera is open, Android often KILLS this app's process to free memory;
+    // registerForActivityResult survives that and still delivers the result —
+    // but any instance variable (like a remembered "pending file") comes back
+    // null, so the photo silently vanished. A deterministic path means there
+    // is nothing to remember.
+    private fun cameraTempFile(): java.io.File {
+        val dir = java.io.File(requireContext().cacheDir, "camera").apply { mkdirs() }
+        return java.io.File(dir, "capture.jpg")
+    }
+
+    private val takePhotoLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.TakePicture()
+    ) { saved ->
+        val tempFile = cameraTempFile()
+        if (!saved || !tempFile.exists() || tempFile.length() == 0L) {
+            tempFile.delete()
+            return@registerForActivityResult
+        }
+        storeAndInsert {
+            val name = NoteImageStore.importFile(appCtx(), tempFile)
+            tempFile.delete() // temp copy no longer needed once imported
+            name
+        }
+    }
+
+    private fun launchCamera() {
+        val ctx = requireContext()
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            ctx, "${ctx.packageName}.fileprovider", cameraTempFile()
+        )
+        takePhotoLauncher.launch(uri)
+    }
+
+    // Resize feature — tapping an inserted image opens view/size options.
+    private fun onImageTapped(image: NoteFormatting.FImage) {
+        val options = arrayOf(
+            getString(R.string.image_view_full),
+            getString(R.string.image_size_small),
+            getString(R.string.image_size_medium),
+            getString(R.string.image_size_full)
+        )
+        val scales = floatArrayOf(0f, 0.4f, 0.65f, 1f) // 0f = "view", not a size
+        com.google.android.material.dialog.MaterialAlertDialogBuilder(requireContext())
+            .setTitle(getString(R.string.image_size_title))
+            .setItems(options) { _, index ->
+                if (index == 0) {
+                    ImageViewerDialog(requireContext(), image.fileName).show()
+                } else {
+                    NoteFormatting.setImageScale(
+                        noteBody, requireContext(), image, scales[index], ::onImageTapped
+                    )
+                }
+            }
+            .setNegativeButton(getString(R.string.action_cancel), null)
+            .show()
+    }
+
+    /** Run the (disk-heavy) [store] step off the main thread, then insert on it. */
+    private fun storeAndInsert(store: () -> String?) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val name = withContext(Dispatchers.IO) { store() }
+            if (name != null) {
+                NoteFormatting.insertImage(noteBody, requireContext(), name, ::onImageTapped)
+            } else {
+                android.widget.Toast.makeText(
+                    requireContext(),
+                    getString(R.string.image_failed),
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    /** Generic PopupMenu: pairs of (value, label resource) → callback with the picked value. */
+    private fun <T> showPopup(anchor: View, items: List<Pair<T, Int>>, onPick: (T) -> Unit) {
+        val popup = androidx.appcompat.widget.PopupMenu(requireContext(), anchor)
+        items.forEachIndexed { index, (_, labelRes) ->
+            popup.menu.add(0, index, index, getString(labelRes))
+        }
+        popup.setOnMenuItemClickListener { item ->
+            onPick(items[item.itemId].first)
+            true
+        }
+        popup.show()
+    }
+
+    // Improvement #2 — the TextWatcher posts a delayed Runnable to highlightHandler.
+    // If the view is destroyed while one is still pending, it would fire afterwards
+    // and touch viewLifecycleOwner / noteBody (crash: IllegalStateException).
+    // Removing it here pairs every postDelayed() with a guaranteed cleanup.
+    override fun onDestroyView() {
+        // null token = clear ALL callbacks on this handler, including the
+        // untracked one posted from highlightVerseRefs' finally block.
+        highlightHandler.removeCallbacksAndMessages(null)
+        highlightRunnable = null
+        super.onDestroyView()
+    }
+
     // §4 — Autosave so edits survive system-back, app-switch, or process death.
     // Runs on the app scope (not the view scope) so the write completes even as
     // this fragment's view is being destroyed.
@@ -191,10 +382,13 @@ class NoteEditorFragment : Fragment() {
         super.onPause()
         val id = currentNoteId ?: return
         if (noteTitleEdit.visibility == View.VISIBLE) finishTitleEdit()
-        val title = noteTitleText.text.toString().trim().ifEmpty { "New Note" }
+        val title = noteTitleText.text.toString().trim().ifEmpty { getString(R.string.default_note_title) }
         val body = noteBody.text.toString()
+        // Serialize the spans HERE on the main thread — the Editable belongs to
+        // the UI; only the resulting plain strings cross into the coroutine.
+        val formatting = NoteFormatting.toJson(noteBody.text)
         requireContext().app.appScope.launch {
-            notesRepo.update(id, title, body)
+            notesRepo.update(id, title, body, formatting)
         }
     }
 
@@ -204,6 +398,14 @@ class NoteEditorFragment : Fragment() {
         noteTitleEdit.visibility = View.GONE
         noteTitleText.visibility = View.VISIBLE
         noteBody.setText(note.body)
+        // Rich-text feature — re-attach the saved formatting spans. Must run
+        // AFTER setText (which builds a fresh Editable) and is safe alongside
+        // the verse highlighter, which only ever touches ClickableSpans.
+        NoteFormatting.applyJson(
+            requireContext(), noteBody.text, note.formatting,
+            requireContext().getColor(R.color.text_tertiary),
+            ::onImageTapped
+        )
         viewLifecycleOwner.lifecycleScope.launch {
             highlightVerseRefs(noteBody.text)
             updateHighlightBox(noteBody.text)
@@ -214,9 +416,10 @@ class NoteEditorFragment : Fragment() {
     private suspend fun saveNote() {
         val id = currentNoteId ?: return
         if (noteTitleEdit.visibility == View.VISIBLE) finishTitleEdit()
-        val title = noteTitleText.text.toString().trim().ifEmpty { "New Note" }
+        val title = noteTitleText.text.toString().trim().ifEmpty { getString(R.string.default_note_title) }
         val body = noteBody.text.toString()
-        notesRepo.update(id, title, body)
+        val formatting = NoteFormatting.toJson(noteBody.text)
+        notesRepo.update(id, title, body, formatting)
     }
 
     private fun startTitleEdit() {
@@ -231,7 +434,7 @@ class NoteEditorFragment : Fragment() {
     }
 
     private fun finishTitleEdit() {
-        val newTitle = noteTitleEdit.text.toString().trim().ifEmpty { "New Note" }
+        val newTitle = noteTitleEdit.text.toString().trim().ifEmpty { getString(R.string.default_note_title) }
         noteTitleText.text = newTitle
         noteTitleText.visibility = View.VISIBLE
         noteTitleEdit.visibility = View.GONE
@@ -245,7 +448,12 @@ class NoteEditorFragment : Fragment() {
         isHighlighting = true
         try {
             val oldSpans = editable.getSpans(0, editable.length, ClickableSpan::class.java)
-            for (s in oldSpans) editable.removeSpan(s)
+            for (s in oldSpans) {
+                // Resize feature — the image tap-targets are ClickableSpans too;
+                // they belong to the image, not to us, so leave them alone.
+                if (s is NoteFormatting.ImageClick) continue
+                editable.removeSpan(s)
+            }
 
             for (m in refRegex.findAll(editable.toString())) {
                 val bookToken = m.groupValues[1]

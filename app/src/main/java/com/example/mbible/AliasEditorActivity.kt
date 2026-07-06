@@ -35,8 +35,8 @@ class AliasEditorActivity : AppCompatActivity() {
         setContentView(R.layout.activity_alias_editor)
         ThemeManager.applyStatusBarIcons(this)
 
-        // After Section 3 you can swap this for: app.aliasRepository
-        aliasRepo = BookAliasRepository(this)
+        // Improvement #1 — shared app-scoped singleton (one DB connection app-wide).
+        aliasRepo = app.aliasRepository
         book = intent.getStringExtra(EXTRA_BOOK) ?: "Book"
 
         bookTitle = findViewById(R.id.bookTitle)
@@ -68,16 +68,16 @@ class AliasEditorActivity : AppCompatActivity() {
             aliases,
             onDelete = { alias ->
                 AlertDialog.Builder(this)
-                    .setTitle("Delete short name?")
-                    .setMessage("Remove \u201C$alias\u201D from $book?")
-                    .setPositiveButton("Delete") { _, _ ->
+                    .setTitle(getString(R.string.delete_alias_title))
+                    .setMessage(getString(R.string.delete_alias_message, alias, book))
+                    .setPositiveButton(getString(R.string.action_delete)) { _, _ ->
                         // WRAP — deleteAlias() is now suspend
                         lifecycleScope.launch {
                             aliasRepo.deleteAlias(alias)
                             loadAliases()
                         }
                     }
-                    .setNegativeButton("Cancel", null)
+                    .setNegativeButton(getString(R.string.action_cancel), null)
                     .show()
             }
         )
@@ -96,7 +96,7 @@ class AliasEditorActivity : AppCompatActivity() {
                     // NB: inside launch, `this` is the coroutine scope — qualify the Activity.
                     Toast.makeText(
                         this@AliasEditorActivity,
-                        "Alias already exists or invalid",
+                        getString(R.string.alias_exists_or_invalid),
                         Toast.LENGTH_SHORT
                     ).show()
                     return@launch
