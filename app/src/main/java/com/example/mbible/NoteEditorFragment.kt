@@ -39,6 +39,7 @@ class NoteEditorFragment : Fragment() {
     private lateinit var btnSaveNote: Button
 
     private var currentNoteId: Long? = null
+    private var noteLoadJob: kotlinx.coroutines.Job? = null
     private var isHighlighting = false
     private val highlightHandler = Handler(Looper.getMainLooper())
     private var highlightRunnable: Runnable? = null
@@ -137,7 +138,7 @@ class NoteEditorFragment : Fragment() {
 
         // Load note — WRAP (§2): getById() is now suspend.
         currentNoteId?.let { id ->
-            viewLifecycleOwner.lifecycleScope.launch {
+            noteLoadJob = viewLifecycleOwner.lifecycleScope.launch {
                 val note = notesRepo.getById(id)
                 if (note != null) loadNote(note)
             }
@@ -337,6 +338,7 @@ class NoteEditorFragment : Fragment() {
     /** Run the (disk-heavy) [store] step off the main thread, then insert on it. */
     private fun storeAndInsert(store: () -> String?) {
         viewLifecycleOwner.lifecycleScope.launch {
+            noteLoadJob?.join()
             val name = withContext(Dispatchers.IO) { store() }
             if (name != null) {
                 NoteFormatting.insertImage(noteBody, requireContext(), name, ::onImageTapped)

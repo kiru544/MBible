@@ -115,7 +115,7 @@ class AliasEditorActivity : AppCompatActivity() {
             aliases.clear()
             aliases.addAll(result)
             adapter.notifyDataSetChanged()
-            aliasCountLabel.text = "\u25C6 SHORT NAMES \u00B7 ${aliases.size}"
+            aliasCountLabel.text = "\u25C6 Alias \u00B7 ${aliases.size}"
         }
     }
 }

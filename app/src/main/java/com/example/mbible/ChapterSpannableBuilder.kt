@@ -74,8 +74,21 @@ class ChapterSpannableBuilder(
         val numColor = context.getColor(R.color.accent_red)
         val dimColor = context.getColor(R.color.text_tertiary)
 
-        for ((index, verse) in verses.withIndex()) {
+        for (verse in verses) {
             val numStr = "${verse.verse}"
+
+            // NIV formatting — each verse knows how it attaches to the one
+            // before it: flow on (KJV and mid-paragraph verses), a poetry line
+            // break, or a full paragraph break. Headings/superscriptions bring
+            // their own spacing, so skip the break when one is present.
+            val hasHeaderBlock = verse.heading != null || verse.superscription != null
+            if (spannable.isNotEmpty() && !hasHeaderBlock) {
+                when (verse.leadingBreak) {
+                    2 -> spannable.append("\n\n") // new paragraph
+                    1 -> spannable.append("\n")    // next poetry line
+                    else -> spannable.append(" ")   // flow on
+                }
+            }
 
             // Section heading on its own line above the verse.
             verse.heading?.let { h ->
@@ -88,6 +101,20 @@ class ChapterSpannableBuilder(
                 spannable.setSpan(ForegroundColorSpan(numColor), hStart, hEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 spannable.append("\n")
             }
+
+            // Psalm superscription ("A psalm of David.") — its own line, italic
+            // and dim, matching how print NIV distinguishes it from verse text.
+            verse.superscription?.let { d ->
+                if (spannable.isNotEmpty() && verse.heading == null) spannable.append("\n\n")
+                val dStart = spannable.length
+                spannable.append(d)
+                spannable.setSpan(StyleSpan(android.graphics.Typeface.ITALIC), dStart, spannable.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                spannable.setSpan(ForegroundColorSpan(dimColor), dStart, spannable.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                spannable.append("\n")
+            }
+
+            // Poetry indent when the verse itself starts on an indented line.
+            if (verse.indent) spannable.append("\u2002\u2002")
 
             // Verse number (capture start AFTER the heading so spans land on the number).
             val numStart = spannable.length
@@ -147,7 +174,7 @@ class ChapterSpannableBuilder(
                 }, mStart, mEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
 
-            if (index < verses.size - 1) spannable.append(" ")
+            // (inter-verse spacing is handled by each verse's leadingBreak above)
         }
 
         return spannable

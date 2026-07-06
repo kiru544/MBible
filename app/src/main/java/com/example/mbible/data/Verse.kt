@@ -5,7 +5,13 @@ data class Verse(
     val text: String,
     val footnotes: List<Footnote> = emptyList(),
     val heading: String? = null,
-    val segments: List<VerseSegment> = emptyList()
+    val segments: List<VerseSegment> = emptyList(),
+    // NIV formatting — structure parsed from the chapter HTML. Defaults keep
+    // the local KJV source (which never sets these) compiling and flowing
+    // exactly as before.
+    val superscription: String? = null, // e.g. "A psalm of David." (USFM "d")
+    val leadingBreak: Int = 0,          // 0 = flow on, 1 = new line (poetry), 2 = new paragraph
+    val indent: Boolean = false         // verse starts on an indented (q2) poetry line
 )
 
 /**
